@@ -1,0 +1,270 @@
+"""Inference helpers: load a trained Vanta checkpoint OR a SepFormer-based
+backbone and extract a target speaker.
+
+Two backends, same interface:
+  - VantaInference          : our from-scratch separator + our speaker encoder
+  - VantaSepFormerInference : pretrained SepFormer + speaker selection
+
+Picked at server startup via VANTA_BACKEND. `trained` is what production runs
+and what the project is: the from-scratch pair reaches +8.45 dB SI-SDR, ahead
+of the pretrained-encoder configuration it replaced. The SepFormer path is kept
+as a manual fallback only and is not active anywhere.
+"""
+
+from __future__ import annotations
+
+import io
+import subprocess
+from pathlib import Path
+
+import numpy as np
+import soundfile as sf
+import torch
+
+from vanta.config import SAMPLE_RATE
+from vanta.models.vanta import Vanta, VantaConfig
+from vanta.utils.audio import peak_normalize
+
+MAX_MIX_SECONDS = 30.0
+ENROLL_SECONDS = 5.0
+
+
+def _ffmpeg_decode(raw: bytes) -> np.ndarray:
+    """Decode arbitrary-container bytes to mono 16 kHz float32 via ffmpeg.
+
+    libsndfile can't read MP4/M4A/WebM/MOV and so on; ffmpeg can.
+
+    Piping is tried first (no temp file), but it is not sufficient on its own:
+    MP4/MOV keep their index in a `moov` atom that may sit *after* the media
+    data, and ffmpeg cannot rewind a pipe to find it. Such files decode to zero
+    samples while still exiting 0 — which surfaces downstream as a confusing
+    "Calculated padded input size per channel: (0)" from the first conv layer.
+    Phone recordings routinely lack the faststart flag, so we fall back to a
+    real temp file, which ffmpeg *can* seek.
+    """
+    from imageio_ffmpeg import get_ffmpeg_exe
+
+    def run(source: str, stdin: bytes | None) -> bytes:
+        cmd = [
+            get_ffmpeg_exe(),
+            "-hide_banner",
+            "-loglevel", "error",
+            "-i", source,
+            "-vn",                  # ignore any video stream
+            "-ac", "1",             # mono
+            "-ar", str(SAMPLE_RATE),
+            "-f", "f32le",          # raw float32 output — trivial to np.frombuffer
+            "pipe:1",
+        ]
+        proc = subprocess.run(cmd, input=stdin, capture_output=True)
+        if proc.returncode != 0:
+            err = proc.stderr.decode("utf-8", errors="replace").strip()
+            raise ValueError(f"ffmpeg decode failed: {err or 'no stderr'}")
+        return proc.stdout
+
+    try:
+        out = run("pipe:0", raw)
+    except ValueError:
+        out = b""
+    if out:
+        return np.frombuffer(out, dtype=np.float32).copy()
+
+    # Empty output: the container needed seeking. Retry from a real file.
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as tmp:
+        tmp.write(raw)
+        path = tmp.name
+    try:
+        out = run(path, None)
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+    if not out:
+        raise ValueError("ffmpeg produced no audio — is there an audio stream?")
+    return np.frombuffer(out, dtype=np.float32).copy()
+
+
+def _to_mono_16k(raw: bytes) -> np.ndarray:
+    # Fast path: libsndfile handles WAV/FLAC/OGG/MP3 without spawning a process.
+    try:
+        wav, sr = sf.read(io.BytesIO(raw), dtype="float32", always_2d=False)
+    except Exception:
+        # Anything libsndfile refuses — MP4, M4A, WebM, MOV, etc. — goes to ffmpeg.
+        return _ffmpeg_decode(raw)
+
+    if wav.ndim > 1:
+        wav = wav.mean(axis=1)
+    if sr != SAMPLE_RATE:
+        import soxr
+        wav = soxr.resample(wav, sr, SAMPLE_RATE, quality="HQ")
+    return wav.astype(np.float32, copy=False)
+
+
+def _fit(wav: np.ndarray, target_samples: int) -> np.ndarray:
+    if len(wav) >= target_samples:
+        return wav[:target_samples]
+    out = np.zeros(target_samples, dtype=wav.dtype)
+    out[: len(wav)] = wav
+    return out
+
+
+class VantaInference:
+    """Wraps a trained Vanta model for single-file inference.
+
+    Load once at startup, call `.extract(mixture_bytes, enrollment_bytes)` per
+    request. Returns (extracted_wav_bytes, residue_wav_bytes).
+
+    `repeats` and `speaker_encoder_ckpt` must match how the checkpoint was
+    trained — the current models use repeats=3 with our own encoder.
+    """
+
+    def __init__(
+        self,
+        checkpoint_path: Path,
+        repeats: int = 3,
+        device: str = "auto",
+        speaker_encoder_ckpt: str | None = None,
+    ):
+        if device == "auto":
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = torch.device(device)
+        self.model = Vanta(
+            VantaConfig(repeats=repeats, speaker_encoder_ckpt=speaker_encoder_ckpt)
+        )
+        ck = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        # strict=False when swapping encoders: the separator weights are what the
+        # checkpoint carries, while the speaker encoder's weights come from
+        # whichever encoder was constructed above.
+        self.model.load_state_dict(ck["model_state"], strict=speaker_encoder_ckpt is None)
+        self.model.to(self.device).eval()
+
+    @torch.no_grad()
+    def extract(
+        self, mixture_bytes: bytes, enrollment_bytes: bytes
+    ) -> tuple[bytes, bytes, dict]:
+        mixture = _to_mono_16k(mixture_bytes)
+        enrollment = _to_mono_16k(enrollment_bytes)
+
+        # Guardrails on request size.
+        orig_mix_samples = len(mixture)
+        max_samples = int(MAX_MIX_SECONDS * SAMPLE_RATE)
+        if len(mixture) > max_samples:
+            mixture = mixture[:max_samples]
+
+        # Enrollment has to be exactly ENROLL_SECONDS for our trained model.
+        enrollment = _fit(enrollment, int(ENROLL_SECONDS * SAMPLE_RATE))
+        enrollment = peak_normalize(enrollment, peak=0.95)
+
+        mix_t = torch.from_numpy(mixture).unsqueeze(0).to(self.device)
+        enr_t = torch.from_numpy(enrollment).unsqueeze(0).to(self.device)
+
+        # AMP matches how we trained, and it halves memory on long clips.
+        use_amp = self.device.type == "cuda"
+        if use_amp:
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                est = self.model(mix_t, enrollment=enr_t).float()
+        else:
+            est = self.model(mix_t, enrollment=enr_t)
+
+        estimate = est.squeeze(0).cpu().numpy()
+
+        # SI-SDR is invariant to BOTH scale and sign, so training never
+        # constrains either: outputs routinely peak at ±100 and are often
+        # phase-inverted (a flipped waveform scores identically). That is
+        # inaudible on its own, but it breaks the residue below, where
+        # subtracting an inverted estimate *adds* it back instead.
+        #
+        # So align the estimate to the mixture by least squares — the scalar
+        # that best explains the mixture — which recovers the correct gain and
+        # sign together, and puts the estimate in the mixture's own frame.
+        mix_ref = mixture[: len(estimate)]
+        alpha = float(np.dot(mix_ref, estimate)) / (float(np.dot(estimate, estimate)) + 1e-8)
+        estimate = (alpha * estimate).astype(np.float32)
+
+        # Residue = what Vanta removed. Valid only because `estimate` is now in
+        # the mixture's frame: estimate + residue reconstructs the input exactly.
+        residue = mix_ref - estimate
+
+        # Playback gain, applied AFTER the decomposition so it can't corrupt it.
+        # A voice that was quiet in the mixture stays quiet once isolated, which
+        # is correct but hard to hear, so lift each track to a usable level.
+        def _for_playback(w: np.ndarray) -> np.ndarray:
+            peak = float(np.max(np.abs(w)))
+            return (w * (0.95 / peak)).astype(np.float32) if peak > 1e-6 else w
+
+        estimate = _for_playback(estimate)
+        residue = _for_playback(residue)
+
+        meta = {
+            "sample_rate": SAMPLE_RATE,
+            "input_seconds": orig_mix_samples / SAMPLE_RATE,
+            "output_seconds": len(estimate) / SAMPLE_RATE,
+            "truncated": orig_mix_samples > max_samples,
+        }
+        return _encode_wav(estimate), _encode_wav(residue), meta
+
+
+def _encode_wav(wav: np.ndarray) -> bytes:
+    buf = io.BytesIO()
+    sf.write(buf, wav, SAMPLE_RATE, subtype="PCM_16", format="WAV")
+    return buf.getvalue()
+
+
+class VantaSepFormerInference:
+    """SepFormer-backbone inference. Same public interface as VantaInference
+    so server.py can swap between them without code changes."""
+
+    def __init__(
+        self,
+        sepformer_source: str = "speechbrain/sepformer-libri2mix",
+        device: str = "auto",
+    ):
+        from vanta.models.sepformer_tse import SepFormerTSE
+
+        if device == "auto":
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = torch.device(device)
+        self.model = SepFormerTSE(
+            sepformer_source=sepformer_source, device=self.device
+        )
+
+    @torch.no_grad()
+    def extract(
+        self, mixture_bytes: bytes, enrollment_bytes: bytes
+    ) -> tuple[bytes, bytes, dict]:
+        mixture = _to_mono_16k(mixture_bytes)
+        enrollment = _to_mono_16k(enrollment_bytes)
+
+        orig_mix_samples = len(mixture)
+        max_samples = int(MAX_MIX_SECONDS * SAMPLE_RATE)
+        if len(mixture) > max_samples:
+            mixture = mixture[:max_samples]
+
+        enrollment = _fit(enrollment, int(ENROLL_SECONDS * SAMPLE_RATE))
+        enrollment = peak_normalize(enrollment, peak=0.95)
+
+        mix_t = torch.from_numpy(mixture).unsqueeze(0).to(self.device)
+        enr_t = torch.from_numpy(enrollment).unsqueeze(0).to(self.device)
+
+        extracted_t, residue_t, model_meta = self.model(mix_t, enr_t)
+        extracted = extracted_t.squeeze(0).cpu().numpy()
+        residue = residue_t.squeeze(0).cpu().numpy()
+
+        # Match the mixture's loudness for natural playback (SepFormer outputs
+        # are typically lower-amplitude than the input).
+        mix_peak = float(np.max(np.abs(mixture[: len(extracted)]))) + 1e-8
+        for arr in (extracted, residue):
+            peak = float(np.max(np.abs(arr))) + 1e-8
+            if peak > 0:
+                arr *= mix_peak * 0.95 / peak
+
+        meta = {
+            "sample_rate": SAMPLE_RATE,
+            "input_seconds": orig_mix_samples / SAMPLE_RATE,
+            "output_seconds": len(extracted) / SAMPLE_RATE,
+            "truncated": orig_mix_samples > max_samples,
+            "backend": "sepformer",
+            **model_meta,
+        }
+        return _encode_wav(extracted), _encode_wav(residue), meta

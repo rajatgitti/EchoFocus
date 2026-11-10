@@ -1,0 +1,47 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Datasets and storage
+/data/
+/datasets/
+library_storage/
+echofocus.db
+*.db
+*.sqlite3
+
+# Local test audio
+realtest/
+test_*.wav
+
+# Model checkpoints
+checkpoints/
+*.pt
+*.pth
+*.onnx
+
+# Logs
+*.log
+
+# Frontend
+web/node_modules/
+web/.next/
+web/.vercel/
+web/out/
+web/.env.local
+
+# HF Space staging
+deploy/_hf_push/
+deploy/hf-space/vanta/
+deploy/hf-space/checkpoints/
+deploy/hf-space/server.py
+
+# IDE & OS
+.vscode/
+.idea/
+.claude/
+Thumbs.db
+.DS_Store

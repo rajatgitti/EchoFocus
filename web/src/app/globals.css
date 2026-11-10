@@ -1,0 +1,277 @@
+@import "tailwindcss";
+
+:root {
+  /* Soft Industrial Palette */
+  --bg-app: #F0EEE1; 
+  --bg-header: #F0EEE1; 
+  --bg-footer: #F0EEE1; 
+  --bg-card: #E8E6D9; 
+  --bg-btn: #E8E6D9;
+  
+  --border-main: #D6D4C7;
+  --border-card: #CECBBF;
+  --border-dashed: #BDBAB0;
+  
+  --text-main: #2C2C2A;
+  --text-muted: #7A7A75;
+  
+  /* Node Colors */
+  --c-node-brown: #A68A64;
+  --c-node-red: #B54545;
+  --c-node-green: #4A6B4A;
+  --c-node-purple: #745296;
+  
+  --bg-card-rgb: 232, 230, 217;
+  --text-main-rgb: 44, 44, 42;
+}
+
+.dark {
+  --bg-app: #121211; 
+  --bg-header: #121211; 
+  --bg-footer: #121211; 
+  --bg-card: #1C1C1A; 
+  --bg-btn: #242422;
+  
+  --border-main: #2A2A28;
+  --border-card: #222220;
+  --border-dashed: #3A3A38;
+  
+  --text-main: #D1D1CB;
+  --text-muted: #7A7A75;
+  
+  --c-node-brown: #A68A64;
+  --c-node-red: #B54545;
+  --c-node-green: #4A6B4A;
+  --c-node-purple: #745296;
+  
+  --bg-card-rgb: 28, 28, 26;
+  --text-main-rgb: 209, 209, 203;
+}
+
+@theme inline {
+  --color-background: var(--bg-app);
+  --color-foreground: var(--text-main);
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+@layer base {
+  body {
+    @apply bg-[var(--bg-app)] text-[var(--text-main)] font-sans antialiased transition-colors duration-300;
+  }
+}
+
+@layer components {
+  .font-mono-heading {
+    @apply font-mono font-bold tracking-tight uppercase;
+  }
+  
+  .vanta-card {
+    @apply bg-[var(--bg-card)] border border-[var(--border-main)] rounded-lg shadow-sm transition-all duration-300;
+  }
+  
+  .vanta-btn {
+    @apply flex items-center justify-center p-2 rounded-lg bg-[var(--bg-btn)] border border-[var(--border-main)] text-[var(--text-main)] hover:bg-[var(--border-main)] transition-all cursor-pointer;
+  }
+
+  .status-dot {
+    @apply w-2 h-2 rounded-full inline-block mr-2;
+  }
+}
+
+@keyframes noise-move {
+  0% { transform: translate(0, 0); }
+  10% { transform: translate(-1%, -1%); }
+  20% { transform: translate(-2%, 1%); }
+  30% { transform: translate(1%, -2%); }
+  40% { transform: translate(-1%, 3%); }
+  50% { transform: translate(-2%, 1%); }
+  60% { transform: translate(3%, 2%); }
+  70% { transform: translate(2%, 1%); }
+  80% { transform: translate(-1%, -1%); }
+  90% { transform: translate(2%, -3%); }
+  100% { transform: translate(1%, 2%); }
+}
+
+@layer components {
+  .panel {
+    @apply bg-[var(--bg-card)] rounded-sm shadow-sm;
+  }
+
+  .inset-panel {
+    @apply bg-[var(--bg-app)] shadow-inner rounded-sm;
+  }
+
+  .industrial-button {
+    @apply bg-[var(--bg-card)] hover:bg-black/5 dark:hover:bg-white/5 active:translate-y-[1px] active:shadow-inner transition-all rounded-sm font-bold uppercase tracking-widest text-[var(--text-main)];
+  }
+}
+
+/* Custom Inset Shadow for hardware look */
+.shadow-inner {
+  box-shadow: inset 0 2px 4px 0 rgba(0, 0, 0, 0.05);
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-app);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-card);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* Driver.js Custom Styling - Vanta Premium Glass Theme */
+.driver-popover.driverjs-theme {
+  background-color: var(--bg-card) !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  color: var(--text-main) !important;
+  border-radius: 12px !important;
+  border: 1px solid var(--border-main) !important;
+  box-shadow: 
+    0 25px 50px -12px rgba(0, 0, 0, 0.5),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.05) !important;
+  padding: 28px !important;
+  max-width: 420px !important;
+}
+
+.driver-popover.driverjs-theme .driver-popover-title {
+  font-family: var(--font-mono) !important;
+  font-weight: 900 !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.12em !important;
+  font-size: 13px !important;
+  color: var(--text-main) !important;
+  margin-bottom: 16px !important;
+  border-left: 3px solid var(--text-main) !important;
+  padding-left: 12px !important;
+  padding-right: 35px !important;
+}
+
+.driver-popover.driverjs-theme .driver-popover-description {
+  font-family: inherit !important;
+  font-size: 13px !important;
+  line-height: 1.7 !important;
+  font-weight: 500 !important;
+  color: var(--text-main) !important;
+  opacity: 0.9 !important;
+}
+
+.driver-popover.driverjs-theme .driver-popover-navigation-btns {
+  margin-top: 32px !important;
+  gap: 12px !important;
+  justify-content: flex-end !important;
+}
+
+.driver-popover.driverjs-theme .driver-popover-next-btn,
+.driver-popover.driverjs-theme .driver-popover-prev-btn {
+  background-color: var(--text-main) !important;
+  color: var(--bg-app) !important;
+  border: none !important;
+  border-radius: 4px !important;
+  font-family: var(--font-mono) !important;
+  font-weight: 800 !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.1em !important;
+  font-size: 10px !important;
+  padding: 10px 20px !important;
+  text-shadow: none !important;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2) !important;
+}
+
+.driver-popover.driverjs-theme .driver-popover-close-btn {
+  position: absolute !important;
+  top: 15px !important;
+  right: 15px !important;
+  width: 34px !important;
+  height: 34px !important;
+  background-color: var(--border-main) !important;
+  color: var(--text-main) !important;
+  border-radius: 8px !important;
+  border: 1px solid rgba(var(--text-main-rgb), 0.1) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  font-size: 20px !important;
+  font-weight: 400 !important;
+  padding: 0 0 2px 0 !important;
+  cursor: pointer !important;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1) !important;
+  z-index: 1000 !important;
+}
+
+.driver-popover.driverjs-theme .driver-popover-close-btn:hover {
+  background-color: var(--text-main) !important;
+  color: var(--bg-app) !important;
+  transform: scale(1.1) rotate(90deg) !important;
+  box-shadow: 0 5px 15px rgba(0,0,0,0.2) !important;
+}
+.driver-popover.driverjs-theme .driver-popover-next-btn:hover {
+  transform: translateY(-1px) !important;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3), 0 0 0 1px var(--text-main) !important;
+  filter: brightness(1.2) !important;
+}
+
+.driver-popover.driverjs-theme .driver-popover-prev-btn {
+  background-color: transparent !important;
+  color: var(--text-main) !important;
+  border: 1px solid rgba(var(--text-main-rgb), 0.2) !important;
+  box-shadow: none !important;
+}
+
+.driver-popover.driverjs-theme .driver-popover-prev-btn:hover {
+  background-color: rgba(var(--text-main-rgb), 0.05) !important;
+  border-color: var(--text-main) !important;
+}
+
+.driver-popover.driverjs-theme .driver-popover-progress-text {
+  color: var(--text-muted) !important;
+  font-family: var(--font-mono) !important;
+  font-size: 10px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.1em !important;
+  opacity: 0.5 !important;
+}
+
+.driver-popover.driverjs-theme .driver-popover-arrow {
+  border-color: rgba(var(--bg-card-rgb), 0.85) !important;
+}
+
+/* Spotlight styling */
+.driver-active-element {
+  outline: none !important;
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 8px !important;
+  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+.driver-stage-no-animation, 
+.driver-stage-animation {
+  fill: rgba(0, 0, 0, 0.7) !important;
+  stroke: none !important;
+  stroke-width: 0 !important;
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: var(--border-main);
+  border-radius: 10px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
