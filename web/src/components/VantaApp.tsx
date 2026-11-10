@@ -7,6 +7,7 @@ import { Header } from "./Header";
 import { TipsCard } from "./TipsCard";
 import {
   extract,
+  retranscribe,
   health,
   fetchLibrary,
   fetchSessionAudio,
@@ -26,7 +27,8 @@ import {
   ChevronUp,
   X,
   Play,
-  Sparkles,
+  Languages,
+  RotateCw,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { driver } from "driver.js";
@@ -51,7 +53,9 @@ export function VantaApp() {
   const [error, setError] = useState<string | null>(null);
   const [sampleLoading, setSampleLoading] = useState(false);
 
-  // Transcription & Confidence UI state
+  // Multilingual Whisper state
+  const [selectedLanguage, setSelectedLanguage] = useState<string>("auto");
+  const [isRegenerating, setIsRegenerating] = useState(false);
   const [copiedTranscript, setCopiedTranscript] = useState(false);
   const [showWordDetails, setShowWordDetails] = useState(false);
 
@@ -92,7 +96,7 @@ export function VantaApp() {
       return;
     }
 
-    const DURATION = 4500; // 4.5 seconds for animation sync
+    const DURATION = 4500;
     const start = Date.now();
 
     const interval = setInterval(() => {
@@ -120,7 +124,7 @@ export function VantaApp() {
     setError(null);
     try {
       const startTime = Date.now();
-      const r = await extract(mixture, enrollment);
+      const r = await extract(mixture, enrollment, selectedLanguage);
       const elapsed = Date.now() - startTime;
 
       const minDuration = 4500;
@@ -139,7 +143,33 @@ export function VantaApp() {
       setError(e instanceof Error ? e.message : "Extraction failed. Please try again.");
       setStatus("error");
     }
-  }, [mixture, enrollment]);
+  }, [mixture, enrollment, selectedLanguage]);
+
+  const handleRegenerateTranscript = useCallback(async () => {
+    if (!result) return;
+    setIsRegenerating(true);
+    try {
+      const updated = await retranscribe(result.meta.sessionId, selectedLanguage, result.extracted);
+      setResult((prev) =>
+        prev
+          ? {
+              ...prev,
+              meta: {
+                ...prev.meta,
+                transcript: updated.transcript,
+                confidence: updated.confidence,
+                detected_language: updated.detected_language,
+                words: updated.words,
+              },
+            }
+          : null
+      );
+    } catch (err) {
+      console.error("Regenerate transcript failed:", err);
+    } finally {
+      setIsRegenerating(false);
+    }
+  }, [result, selectedLanguage]);
 
   const loadSample = useCallback(async () => {
     setSampleLoading(true);
@@ -180,9 +210,8 @@ export function VantaApp() {
       if (!result?.meta.transcript) return;
       let content = "";
       if (format === "txt") {
-        content = `EchoFocus Extracted Transcript\nDate: ${new Date().toISOString()}\nConfidence: ${Math.round((result.meta.confidence ?? 0) * 100)}%\n\n${result.meta.transcript}`;
+        content = `EchoFocus Extracted Transcript\nDate: ${new Date().toISOString()}\nLanguage: ${result.meta.detected_language || selectedLanguage}\nConfidence: ${Math.round((result.meta.confidence ?? 0) * 100)}%\n\n${result.meta.transcript}`;
       } else {
-        // SRT format
         const words = result.meta.words || [];
         if (words.length > 0) {
           content = words
@@ -202,9 +231,9 @@ export function VantaApp() {
         }
       }
       const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-      download(blob, `echofocus_transcript.${format}`);
+      download(blob, `echofocus_transcript_${result.meta.detected_language || "speech"}.${format}`);
     },
-    [result, download]
+    [result, selectedLanguage, download]
   );
 
   const copyTranscriptText = useCallback(() => {
@@ -279,7 +308,7 @@ export function VantaApp() {
           popover: {
             title: "Welcome to EchoFocus",
             description:
-              "Focus on the Voice That Matters. An advanced research platform isolating any target voice from multi-speaker mixtures, with integrated Whisper ASR and genuine confidence estimation.",
+              "Focus on the Voice That Matters. An advanced research platform isolating any target voice from multi-speaker mixtures, with integrated Multilingual Whisper ASR and genuine confidence estimation.",
             side: "bottom",
             align: "start",
           },
@@ -319,7 +348,7 @@ export function VantaApp() {
           popover: {
             title: "Extraction & Inference Engine",
             description:
-              "Runs the trained Conv-TasNet separator conditioned on speaker identity, followed by Whisper ASR and confidence scoring.",
+              "Runs the trained Conv-TasNet separator conditioned on speaker identity, followed by Multilingual Whisper ASR.",
             side: "top",
             align: "center",
           },
@@ -329,7 +358,7 @@ export function VantaApp() {
           popover: {
             title: "Isolated Target Voice",
             description:
-              "The isolated voice is rendered here with interactive waveform playback, Whisper transcript, and WAV download.",
+              "The isolated voice is rendered here with interactive waveform playback, multilingual transcript, and WAV download.",
             side: "left",
             align: "start",
           },
@@ -350,6 +379,16 @@ export function VantaApp() {
   }, []);
 
   const confPercent = Math.round((result?.meta.confidence ?? 0) * 100);
+  const detectedLang = result?.meta.detected_language || "en";
+  const isUrdu = detectedLang === "ur" || selectedLanguage === "ur";
+  const detectedLangLabel =
+    detectedLang === "en"
+      ? "English"
+      : detectedLang === "hi"
+      ? "Hindi (हिन्दी)"
+      : detectedLang === "ur"
+      ? "Urdu (اردو)"
+      : detectedLang.toUpperCase();
 
   return (
     <div className="min-h-screen xl:h-screen w-full flex flex-col bg-[var(--bg-app)] xl:overflow-hidden font-sans">
@@ -478,21 +517,52 @@ export function VantaApp() {
               />
             </div>
 
-            {/* TRANSCRIPTION CARD */}
+            {/* MULTILINGUAL WHISPER ASR TRANSCRIPTION CARD */}
             {result?.meta.transcript && (
               <motion.div
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 className="vanta-card p-4 rounded-xl border border-[var(--border-main)]/60 bg-[var(--bg-card)] shrink-0"
               >
-                <div className="flex items-center justify-between mb-2">
+                {/* ASR Header with Language Selection & Controls */}
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-2 pb-2 border-b border-[var(--border-main)]/30">
                   <div className="flex items-center gap-2">
                     <FileText className="w-4 h-4 text-amber-400" />
                     <span className="font-mono-heading text-[11px] font-black tracking-widest text-[var(--text-main)] uppercase">
                       WHISPER ASR TRANSCRIPT
                     </span>
                   </div>
-                  <div className="flex items-center gap-1.5">
+
+                  {/* Language Selector & Regenerate Action */}
+                  <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1.5 bg-[var(--bg-app)]/80 px-2 py-1 rounded-lg border border-[var(--border-main)]/40">
+                      <Languages className="w-3.5 h-3.5 text-amber-400" />
+                      <select
+                        value={selectedLanguage}
+                        onChange={(e) => setSelectedLanguage(e.target.value)}
+                        className="bg-transparent text-[10px] font-mono font-bold text-[var(--text-main)] outline-none cursor-pointer"
+                        title="Select spoken language"
+                      >
+                        <option value="auto" className="bg-[#1a1a1a] text-white">Auto Detect</option>
+                        <option value="en" className="bg-[#1a1a1a] text-white">English (Latin)</option>
+                        <option value="hi" className="bg-[#1a1a1a] text-white">Hindi (Devanagari)</option>
+                        <option value="ur" className="bg-[#1a1a1a] text-white">Urdu (Perso-Arabic)</option>
+                      </select>
+                    </div>
+
+                    <button
+                      onClick={handleRegenerateTranscript}
+                      disabled={isRegenerating}
+                      className="px-2 py-1 rounded-lg border border-amber-500/30 hover:border-amber-500 bg-amber-500/10 text-amber-400 font-mono text-[9px] font-bold flex items-center gap-1 transition-all disabled:opacity-50"
+                      title="Re-run ASR with selected language"
+                    >
+                      <RotateCw className={`w-3 h-3 ${isRegenerating ? "animate-spin" : ""}`} />
+                      <span>{isRegenerating ? "TRANSCRIBING..." : "REGENERATE"}</span>
+                    </button>
+                  </div>
+
+                  {/* Export and Copy Tools */}
+                  <div className="flex items-center gap-1.5 ml-auto">
                     <button
                       onClick={copyTranscriptText}
                       className="p-1.5 rounded-lg border border-[var(--border-main)] hover:border-amber-400/50 text-[var(--text-muted)] hover:text-[var(--text-main)] transition-all"
@@ -517,9 +587,23 @@ export function VantaApp() {
                   </div>
                 </div>
 
-                <p className="text-[12px] leading-relaxed text-[var(--text-main)] bg-[var(--bg-app)]/50 p-2.5 rounded-lg border border-[var(--border-main)]/30 font-medium">
+                {/* Detected Language Indicator */}
+                <div className="flex items-center justify-between mb-2 text-[10px] font-mono text-[var(--text-muted)]">
+                  <span>
+                    Detected: <strong className="text-amber-400">{detectedLangLabel}</strong>
+                  </span>
+                  <span>Writing: <strong className="text-[var(--text-main)]">{isUrdu ? "Perso-Arabic (RTL)" : detectedLang === "hi" ? "Devanagari (LTR)" : "Latin (LTR)"}</strong></span>
+                </div>
+
+                {/* Transcript text rendered with appropriate script direction */}
+                <div
+                  dir={isUrdu ? "rtl" : "ltr"}
+                  className={`text-[12px] leading-relaxed text-[var(--text-main)] bg-[var(--bg-app)]/50 p-2.5 rounded-lg border border-[var(--border-main)]/30 font-medium ${
+                    isUrdu ? "text-right font-serif" : "text-left"
+                  }`}
+                >
                   &ldquo;{result.meta.transcript}&rdquo;
-                </p>
+                </div>
 
                 {/* Word confidence chips toggle */}
                 {result.meta.words && result.meta.words.length > 0 && (
@@ -528,12 +612,15 @@ export function VantaApp() {
                       onClick={() => setShowWordDetails((prev) => !prev)}
                       className="flex items-center gap-1.5 text-[10px] font-mono text-[var(--text-muted)] hover:text-[var(--text-main)] transition-colors"
                     >
-                      <span>WORD-LEVEL CONFIDENCE ({result.meta.words.length} WORDS)</span>
+                      <span>WORD-LEVEL CONFIDENCE ({result.meta.words.length} TOKENS)</span>
                       {showWordDetails ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
                     </button>
 
                     {showWordDetails && (
-                      <div className="mt-2 flex flex-wrap gap-1.5 max-h-32 overflow-y-auto p-1.5 rounded-lg bg-[var(--bg-app)]/40 border border-[var(--border-main)]/20">
+                      <div
+                        dir={isUrdu ? "rtl" : "ltr"}
+                        className="mt-2 flex flex-wrap gap-1.5 max-h-32 overflow-y-auto p-1.5 rounded-lg bg-[var(--bg-app)]/40 border border-[var(--border-main)]/20"
+                      >
                         {result.meta.words.map((w, idx) => {
                           const p = Math.round(w.probability * 100);
                           const color =
@@ -573,7 +660,7 @@ export function VantaApp() {
                 >
                   {result?.meta.truncated
                     ? `Input was truncated to ${Math.round(result.meta.outputSeconds)}s (EchoFocus inference limit: 30s).`
-                    : "Extracted audio, residue signal, and transcription persist automatically in the EchoFocus Library."}
+                    : "Extracted audio, residue signal, and multilingual transcript persist automatically in the EchoFocus Library."}
                 </p>
               </div>
             </div>
@@ -767,7 +854,7 @@ export function VantaApp() {
         )}
       </AnimatePresence>
 
-      {/* FOOTER WITH PROMINENT VANTA ATTRIBUTION */}
+      {/* CLEAN PROFESSIONAL RESEARCH FOOTER */}
       <footer className="px-10 py-3.5 flex items-center justify-between border-t border-[var(--border-main)]/30 bg-transparent relative z-10 text-[10px] font-mono">
         <div className="flex items-center gap-3">
           <span className="font-bold tracking-widest text-[var(--text-main)] uppercase">
@@ -777,20 +864,10 @@ export function VantaApp() {
           <span className="text-[var(--text-muted)]">Focus on the Voice That Matters.</span>
         </div>
 
-        <div className="flex items-center gap-4">
-          <span className="text-[var(--text-muted)] opacity-80">
-            Extraction foundation:{" "}
-            <a
-              href="https://github.com/Komalpreet2809/Vanta"
-              target="_blank"
-              rel="noreferrer"
-              className="text-amber-500 hover:underline font-bold"
-            >
-              VANTA by Komalpreet Kaur
-            </a>
-          </span>
-          <span className="text-[var(--text-muted)] opacity-40">|</span>
-          <span className="text-[var(--text-muted)] opacity-80">MIT License</span>
+        <div className="flex items-center gap-4 text-[var(--text-muted)]">
+          <span>Target Speaker Isolation & Multilingual ASR Studio</span>
+          <span className="opacity-40">|</span>
+          <span>MIT License</span>
         </div>
       </footer>
     </div>

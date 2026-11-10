@@ -1,4 +1,4 @@
-﻿# EchoFocus Unified Startup Script
+# EchoFocus Unified Startup Script
 $Host.UI.RawUI.WindowTitle = "EchoFocus - Launching System"
 
 Write-Host "==========================================================" -ForegroundColor Cyan
@@ -36,3 +36,4 @@ Start-Sleep -Seconds 4
 Write-Host "`n[3/3] Starting EchoFocus Next.js Frontend on port 3000..." -ForegroundColor Green
 Set-Location web
 & "C:\Users\Rajat\node\npm.cmd" run dev
+

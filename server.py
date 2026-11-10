@@ -3,7 +3,8 @@ Built on the VANTA target speaker extraction foundation (Komalpreet Kaur).
 
 Endpoints:
     GET  /health                         - Model health & status
-    POST /extract?include_residue=true   - Run VANTA extraction + Whisper ASR + confidence
+    POST /extract?include_residue=true   - Run VANTA extraction + Multilingual Whisper ASR
+    POST /transcribe                     - Re-transcribe with specific language (Auto, Hindi, English, Urdu)
     GET  /library                        - List persistent session history
     GET  /library/<id>/audio/<track>     - Serve saved audio (extracted, residue, mixture, reference)
     DELETE /library/<id>                 - Remove a session record
@@ -21,6 +22,7 @@ import json
 import os
 import sqlite3
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -74,7 +76,8 @@ def init_db() -> None:
                 mixture_path TEXT,
                 reference_path TEXT,
                 extracted_path TEXT,
-                residue_path TEXT
+                residue_path TEXT,
+                detected_language TEXT
             )
             """
         )
@@ -101,13 +104,72 @@ def load_models() -> None:
         print(f"[EchoFocus] Failed to load VANTA model: {_init_error}")
 
     try:
-        print("[EchoFocus] Loading Whisper ASR model for confidence-guided transcription...")
+        print("[EchoFocus] Loading Whisper Multilingual ASR model...")
         import whisper
         device = "cuda" if torch.cuda.is_available() else "cpu"
         _whisper_model = whisper.load_model("tiny", device=device)
         print(f"[EchoFocus] Whisper ASR (tiny) loaded successfully on device: {device}")
     except Exception as e:
         print(f"[EchoFocus] Warning: Whisper could not be loaded ({e}); ASR will be disabled.")
+
+
+def run_whisper_asr(audio_path: str | Path, language: str | None = None) -> dict:
+    """Run Whisper Multilingual ASR with word timestamps and genuine confidence estimation."""
+    if _whisper_model is None:
+        return {
+            "transcript": "",
+            "confidence": 0.0,
+            "detected_language": "unknown",
+            "words": [],
+            "error": "Whisper model unavailable",
+        }
+
+    lang_arg = language if language in ("hi", "en", "ur") else None
+
+    try:
+        with _model_lock:
+            asr_result = _whisper_model.transcribe(
+                str(audio_path),
+                language=lang_arg,
+                word_timestamps=True,
+                task="transcribe",
+                temperature=0.0,
+            )
+
+        transcript_text = asr_result.get("text", "").strip()
+        detected_lang = asr_result.get("language", lang_arg or "en")
+
+        probs = []
+        words_data = []
+        for seg in asr_result.get("segments", []):
+            for w in seg.get("words", []):
+                p = float(w.get("probability", np.exp(seg.get("avg_logprob", -0.5))))
+                probs.append(p)
+                words_data.append({
+                    "word": w.get("word", ""),
+                    "start": round(float(w.get("start", 0.0)), 2),
+                    "end": round(float(w.get("end", 0.0)), 2),
+                    "probability": round(p, 3),
+                })
+
+        mean_confidence = float(np.mean(probs)) if probs else (0.85 if transcript_text else 0.0)
+
+        return {
+            "transcript": transcript_text,
+            "confidence": round(mean_confidence, 3),
+            "detected_language": detected_lang,
+            "words": words_data,
+            "language": lang_arg or "auto",
+        }
+    except Exception as e:
+        print(f"[EchoFocus] Whisper transcription error: {e}")
+        return {
+            "transcript": f"[Transcription error: {e}]",
+            "confidence": 0.0,
+            "detected_language": lang_arg or "unknown",
+            "words": [],
+            "error": str(e),
+        }
 
 
 # CORS handler
@@ -164,6 +226,7 @@ def extract_audio():
         return jsonify({"detail": "Received empty audio file."}), 400
 
     include_residue = request.args.get("include_residue", "false").lower() in ("true", "1", "yes")
+    requested_lang = request.args.get("language") or request.form.get("language") or "auto"
 
     session_id = str(uuid.uuid4())[:12]
     session_dir = STORAGE_DIR / session_id
@@ -189,35 +252,8 @@ def extract_audio():
     ext_path.write_bytes(extracted_bytes)
     res_path.write_bytes(residue_bytes)
 
-    # Run Whisper ASR on extracted audio
-    transcript_text = ""
-    mean_confidence = 0.0
-    words_data = []
-
-    if _whisper_model is not None:
-        try:
-            with _model_lock:
-                asr_result = _whisper_model.transcribe(str(ext_path), word_timestamps=True)
-            
-            transcript_text = asr_result.get("text", "").strip()
-            probs = []
-            for seg in asr_result.get("segments", []):
-                for w in seg.get("words", []):
-                    p = float(w.get("probability", np.exp(seg.get("avg_logprob", -0.5))))
-                    probs.append(p)
-                    words_data.append({
-                        "word": w.get("word", ""),
-                        "start": round(float(w.get("start", 0.0)), 2),
-                        "end": round(float(w.get("end", 0.0)), 2),
-                        "probability": round(p, 3),
-                    })
-            if probs:
-                mean_confidence = float(np.mean(probs))
-            elif transcript_text:
-                mean_confidence = 0.85
-        except Exception as e:
-            print(f"[EchoFocus] Whisper transcription warning: {e}")
-            transcript_text = f"[Transcription unavailable: {e}]"
+    # Run Multilingual Whisper ASR on extracted target voice
+    asr_res = run_whisper_asr(ext_path, language=requested_lang)
 
     # Save to SQLite database
     iso_time = datetime.now(timezone.utc).isoformat()
@@ -229,8 +265,8 @@ def extract_audio():
                     id, timestamp, mixture_filename, reference_filename,
                     input_seconds, output_seconds, status, transcript,
                     confidence, words_json, mixture_path, reference_path,
-                    extracted_path, residue_path
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    extracted_path, residue_path, detected_language
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -240,13 +276,14 @@ def extract_audio():
                     meta.get("input_seconds", 0.0),
                     meta.get("output_seconds", 0.0),
                     "completed",
-                    transcript_text,
-                    round(mean_confidence, 3),
-                    json.dumps(words_data),
+                    asr_res["transcript"],
+                    asr_res["confidence"],
+                    json.dumps(asr_res["words"]),
                     str(mix_path),
                     str(ref_path),
                     str(ext_path),
                     str(res_path),
+                    asr_res["detected_language"],
                 ),
             )
             conn.commit()
@@ -266,13 +303,76 @@ def extract_audio():
     return jsonify({
         "extracted_wav_b64": base64.b64encode(extracted_bytes).decode("ascii"),
         "residue_wav_b64": base64.b64encode(residue_bytes).decode("ascii"),
-        "transcript": transcript_text,
-        "confidence": round(mean_confidence, 3),
-        "words": words_data,
+        "transcript": asr_res["transcript"],
+        "confidence": asr_res["confidence"],
+        "detected_language": asr_res["detected_language"],
+        "words": asr_res["words"],
         "session_id": session_id,
         "created_at": iso_time,
         **meta,
     })
+
+
+@app.route("/transcribe", methods=["POST", "OPTIONS"])
+def retranscribe_audio():
+    """Re-transcribe extracted speech with a specific language (Auto, Hindi, English, Urdu)."""
+    if request.method == "OPTIONS":
+        return "", 200
+
+    session_id = request.form.get("session_id") or request.args.get("session_id")
+    language = request.form.get("language") or request.args.get("language") or "auto"
+
+    ext_path = None
+    tmp_path = None
+
+    if session_id:
+        candidate = STORAGE_DIR / session_id / "extracted.wav"
+        if candidate.exists():
+            ext_path = candidate
+
+    if ext_path is None and "audio" in request.files:
+        audio_file = request.files["audio"]
+        fd, tmp_file = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        audio_file.save(tmp_file)
+        ext_path = Path(tmp_file)
+        tmp_path = ext_path
+
+    if ext_path is None:
+        return jsonify({"detail": "Valid session_id or audio file required"}), 400
+
+    try:
+        asr_res = run_whisper_asr(ext_path, language=language)
+
+        if session_id:
+            try:
+                with sqlite3.connect(DB_PATH) as conn:
+                    conn.execute(
+                        """
+                        UPDATE sessions 
+                        SET transcript = ?, confidence = ?, words_json = ?, detected_language = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            asr_res["transcript"],
+                            asr_res["confidence"],
+                            json.dumps(asr_res["words"]),
+                            asr_res["detected_language"],
+                            session_id,
+                        ),
+                    )
+                    conn.commit()
+            except Exception as e:
+                print(f"[EchoFocus] DB update warning: {e}")
+
+        return jsonify({
+            "status": "ok",
+            "session_id": session_id,
+            **asr_res,
+        })
+    finally:
+        if tmp_path and tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
 
 
 @app.route("/library", methods=["GET"])

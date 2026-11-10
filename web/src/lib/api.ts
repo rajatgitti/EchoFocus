@@ -26,6 +26,7 @@ export type ExtractMeta = {
   truncated: boolean;
   transcript?: string;
   confidence?: number;
+  detected_language?: string;
   words?: WordConfidence[];
   sessionId?: string;
   createdAt?: string;
@@ -43,6 +44,7 @@ type ExtractJSON = {
   truncated: boolean;
   transcript?: string;
   confidence?: number;
+  detected_language?: string;
   words?: WordConfidence[];
   session_id?: string;
   created_at?: string;
@@ -66,12 +68,13 @@ export type SessionItem = {
 export async function extract(
   mixture: File,
   enrollment: File,
+  language: string = "auto",
 ): Promise<{ extracted: Blob; residue: Blob; meta: ExtractMeta }> {
   const body = new FormData();
   body.append("mixture", mixture);
   body.append("enrollment", enrollment);
 
-  const url = `${apiBase()}/extract?include_residue=true`;
+  const url = `${apiBase()}/extract?include_residue=true&language=${encodeURIComponent(language)}`;
 
   let resp: Response;
   try {
@@ -106,6 +109,7 @@ export async function extract(
       truncated: data.truncated,
       transcript: data.transcript,
       confidence: data.confidence,
+      detected_language: data.detected_language,
       words: data.words,
       sessionId: data.session_id,
       createdAt: data.created_at,
@@ -114,6 +118,33 @@ export async function extract(
       backend: data.backend,
     },
   };
+}
+
+export async function retranscribe(
+  sessionId?: string,
+  language: string = "auto",
+  audioBlob?: Blob,
+): Promise<{
+  transcript: string;
+  confidence: number;
+  detected_language: string;
+  words: WordConfidence[];
+}> {
+  const body = new FormData();
+  if (sessionId) body.append("session_id", sessionId);
+  body.append("language", language);
+  if (audioBlob) body.append("audio", audioBlob, "extracted.wav");
+
+  const resp = await fetch(`${apiBase()}/transcribe`, {
+    method: "POST",
+    body,
+  });
+
+  if (!resp.ok) {
+    throw new Error(`Transcription failed (${resp.status})`);
+  }
+
+  return await resp.json();
 }
 
 export async function health(): Promise<{ ok: boolean; device?: string; app?: string; whisper?: string }> {
@@ -142,7 +173,10 @@ export async function fetchLibrary(): Promise<SessionItem[]> {
   }
 }
 
-export async function fetchSessionAudio(sessionId: string, track: "extracted" | "residue" | "mixture" | "reference"): Promise<Blob | null> {
+export async function fetchSessionAudio(
+  sessionId: string,
+  track: "extracted" | "residue" | "mixture" | "reference",
+): Promise<Blob | null> {
   try {
     const resp = await fetch(`${apiBase()}/library/${sessionId}/audio/${track}`);
     if (!resp.ok) return null;
