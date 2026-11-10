@@ -99,8 +99,23 @@ def trim_memory() -> None:
         pass
 
 
+def get_whisper_model():
+    global _whisper_model
+    if _whisper_model is None:
+        try:
+            print("[EchoFocus] Loading Whisper Multilingual ASR model on-demand...")
+            import whisper
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            _whisper_model = whisper.load_model("tiny", device=device)
+            trim_memory()
+            print(f"[EchoFocus] Whisper ASR (tiny) loaded successfully on device: {device}")
+        except Exception as e:
+            print(f"[EchoFocus] Warning: Whisper could not be loaded ({e}); ASR will be disabled.")
+    return _whisper_model
+
+
 def load_models() -> None:
-    global _inference, _whisper_model, _init_error
+    global _inference, _init_error
     print("[EchoFocus] Loading VANTA target speaker extraction model...")
     try:
         if not CHECKPOINT_PATH.exists() or not Path(SPK_ENCODER).exists():
@@ -121,20 +136,11 @@ def load_models() -> None:
         _init_error = f"Extraction model error: {type(e).__name__}: {e}"
         print(f"[EchoFocus] Failed to load VANTA model: {_init_error}")
 
-    try:
-        print("[EchoFocus] Loading Whisper Multilingual ASR model...")
-        import whisper
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        _whisper_model = whisper.load_model("tiny", device=device)
-        trim_memory()
-        print(f"[EchoFocus] Whisper ASR (tiny) loaded successfully on device: {device}")
-    except Exception as e:
-        print(f"[EchoFocus] Warning: Whisper could not be loaded ({e}); ASR will be disabled.")
-
 
 def run_whisper_asr(audio_path: str | Path, language: str | None = None) -> dict:
     """Run Whisper Multilingual ASR with memory-efficient inference."""
-    if _whisper_model is None:
+    model = get_whisper_model()
+    if model is None:
         return {
             "transcript": "",
             "confidence": 0.0,
@@ -150,7 +156,7 @@ def run_whisper_asr(audio_path: str | Path, language: str | None = None) -> dict
         with _model_lock:
             with torch.inference_mode():
                 # Avoid word_timestamps=True on CPU to eliminate heavy DTW cross-attention memory allocations
-                asr_result = _whisper_model.transcribe(
+                asr_result = model.transcribe(
                     str(audio_path),
                     language=lang_arg,
                     word_timestamps=use_fp16,
@@ -239,7 +245,8 @@ def health():
         "device": str(_inference.device) if _inference else None,
         "checkpoint": str(CHECKPOINT_PATH),
         "speaker_encoder": str(SPK_ENCODER),
-        "whisper_asr": "loaded" if _whisper_model else "unavailable",
+        "whisper_asr": "loaded" if _whisper_model else "available_on_demand",
+        "version": "v1.2-lazy-asr",
         "error": _init_error,
     }
     return jsonify(info), 200 if ok else 503
@@ -308,13 +315,12 @@ def extract_audio():
         "detected_language": "en",
         "words": [],
     }
-    if _whisper_model is not None:
-        try:
-            asr_res = run_whisper_asr(ext_path, language=requested_lang)
-            trim_memory()
-        except Exception as e:
-            print(f"[EchoFocus] ASR execution warning: {e}")
-            trim_memory()
+    try:
+        asr_res = run_whisper_asr(ext_path, language=requested_lang)
+        trim_memory()
+    except Exception as e:
+        print(f"[EchoFocus] ASR execution warning: {e}")
+        trim_memory()
 
     # Save to SQLite database
     iso_time = datetime.now(timezone.utc).isoformat()
