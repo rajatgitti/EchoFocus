@@ -1,34 +1,24 @@
-# Core — PyTorch installed separately with CUDA index URL
-# torch
-# torchaudio
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.2.0
+torchaudio>=2.2.0
 
 # Audio I/O and processing
 soundfile>=0.12.1
 librosa>=0.10.2
 numpy>=1.26
 scipy>=1.13
+soxr>=0.3.7
 
-# Only for the inactive SepFormer fallback and as the baseline in
-# scripts/compare_encoders.py. The production speaker encoder is our own.
+# Model architecture & baseline utilities
 speechbrain>=1.0
-
-# Evaluation metrics.
-# - pystoi: pure-Python STOI.
-# - torch-pesq: pure-PyTorch PESQ. The reference `pesq` package needs a C
-#   compiler and has no prebuilt wheel for Python 3.13.
-pystoi>=0.4
-torch-pesq>=0.1
-
-# Utilities
 tqdm>=4.66
 pyyaml>=6.0
 
 # Inference server
-fastapi>=0.110
-uvicorn[standard]>=0.27
-python-multipart>=0.0.9
-# Bundled ffmpeg binary for decoding MP4/M4A/WebM uploads before libsndfile
+flask>=3.0.0
+gunicorn>=21.2.0
 imageio-ffmpeg>=0.5
 
-# Weight download (scripts/download_weights.py)
+# Weight download & ASR
 requests>=2.31
+openai-whisper>=20231117
