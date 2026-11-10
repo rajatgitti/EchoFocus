@@ -137,6 +137,9 @@ class VantaInference:
         # checkpoint carries, while the speaker encoder's weights come from
         # whichever encoder was constructed above.
         self.model.load_state_dict(ck["model_state"], strict=speaker_encoder_ckpt is None)
+        del ck
+        import gc
+        gc.collect()
         self.model.to(self.device).eval()
 
     @torch.no_grad()
@@ -146,9 +149,10 @@ class VantaInference:
         mixture = _to_mono_16k(mixture_bytes)
         enrollment = _to_mono_16k(enrollment_bytes)
 
-        # Guardrails on request size.
+        # Guardrails on request size (capped at 20s on CPU to respect container RAM limits).
         orig_mix_samples = len(mixture)
-        max_samples = int(MAX_MIX_SECONDS * SAMPLE_RATE)
+        max_sec = 20.0 if self.device.type == "cpu" else MAX_MIX_SECONDS
+        max_samples = int(max_sec * SAMPLE_RATE)
         if len(mixture) > max_samples:
             mixture = mixture[:max_samples]
 
@@ -167,7 +171,11 @@ class VantaInference:
         else:
             est = self.model(mix_t, enrollment=enr_t)
 
+        del mix_t, enr_t
         estimate = est.squeeze(0).cpu().numpy()
+        del est
+        import gc
+        gc.collect()
 
         # SI-SDR is invariant to BOTH scale and sign, so training never
         # constrains either: outputs routinely peak at ±100 and are often

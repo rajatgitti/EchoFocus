@@ -138,6 +138,9 @@ class TrainedSpeakerEncoder(nn.Module):
         )
         self.encoder.load_state_dict(ck["model_state"])
         self.embed_dim = ck.get("embed_dim", ECAPA_EMBED_DIM)
+        del ck
+        import gc
+        gc.collect()
         self.freeze = freeze
         if freeze:
             for p in self.encoder.parameters():

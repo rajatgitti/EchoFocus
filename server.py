@@ -89,6 +89,16 @@ def init_db() -> None:
         conn.commit()
 
 
+def trim_memory() -> None:
+    """Force release unused memory back to the OS (crucial for Linux containers)."""
+    gc.collect()
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
+
 def load_models() -> None:
     global _inference, _whisper_model, _init_error
     print("[EchoFocus] Loading VANTA target speaker extraction model...")
@@ -105,7 +115,7 @@ def load_models() -> None:
             device=device,
             speaker_encoder_ckpt=SPK_ENCODER,
         )
-        gc.collect()
+        trim_memory()
         print(f"[EchoFocus] VANTA model loaded successfully on device: {_inference.device}")
     except Exception as e:
         _init_error = f"Extraction model error: {type(e).__name__}: {e}"
@@ -116,7 +126,7 @@ def load_models() -> None:
         import whisper
         device = "cuda" if torch.cuda.is_available() else "cpu"
         _whisper_model = whisper.load_model("tiny", device=device)
-        gc.collect()
+        trim_memory()
         print(f"[EchoFocus] Whisper ASR (tiny) loaded successfully on device: {device}")
     except Exception as e:
         print(f"[EchoFocus] Warning: Whisper could not be loaded ({e}); ASR will be disabled.")
@@ -139,15 +149,16 @@ def run_whisper_asr(audio_path: str | Path, language: str | None = None) -> dict
     try:
         with _model_lock:
             with torch.inference_mode():
+                # Avoid word_timestamps=True on CPU to eliminate heavy DTW cross-attention memory allocations
                 asr_result = _whisper_model.transcribe(
                     str(audio_path),
                     language=lang_arg,
-                    word_timestamps=True,
+                    word_timestamps=use_fp16,
                     task="transcribe",
                     fp16=use_fp16,
                     temperature=0.0,
                 )
-        gc.collect()
+        trim_memory()
 
         transcript_text = asr_result.get("text", "").strip()
         detected_lang = asr_result.get("language", lang_arg or "en")
@@ -155,15 +166,36 @@ def run_whisper_asr(audio_path: str | Path, language: str | None = None) -> dict
         probs = []
         words_data = []
         for seg in asr_result.get("segments", []):
-            for w in seg.get("words", []):
-                p = float(w.get("probability", np.exp(seg.get("avg_logprob", -0.5))))
-                probs.append(p)
-                words_data.append({
-                    "word": w.get("word", ""),
-                    "start": round(float(w.get("start", 0.0)), 2),
-                    "end": round(float(w.get("end", 0.0)), 2),
-                    "probability": round(p, 3),
-                })
+            seg_words = seg.get("words", [])
+            seg_prob = float(np.exp(seg.get("avg_logprob", -0.3)))
+            seg_prob = max(0.0, min(1.0, seg_prob))
+
+            if seg_words:
+                for w in seg_words:
+                    p = float(w.get("probability", seg_prob))
+                    probs.append(p)
+                    words_data.append({
+                        "word": w.get("word", ""),
+                        "start": round(float(w.get("start", 0.0)), 2),
+                        "end": round(float(w.get("end", 0.0)), 2),
+                        "probability": round(p, 3),
+                    })
+            else:
+                # Interpolate word timings from segment when word_timestamps is disabled for CPU efficiency
+                text_words = seg.get("text", "").strip().split()
+                if text_words:
+                    start_t = float(seg.get("start", 0.0))
+                    end_t = float(seg.get("end", start_t + 1.0))
+                    dur = max(0.1, end_t - start_t)
+                    w_dur = dur / len(text_words)
+                    for i, tw in enumerate(text_words):
+                        probs.append(seg_prob)
+                        words_data.append({
+                            "word": " " + tw if i > 0 else tw,
+                            "start": round(start_t + i * w_dur, 2),
+                            "end": round(start_t + (i + 1) * w_dur, 2),
+                            "probability": round(seg_prob, 3),
+                        })
 
         mean_confidence = float(np.mean(probs)) if probs else (0.85 if transcript_text else 0.0)
 
@@ -176,7 +208,7 @@ def run_whisper_asr(audio_path: str | Path, language: str | None = None) -> dict
         }
     except Exception as e:
         print(f"[EchoFocus] Whisper transcription error: {e}")
-        gc.collect()
+        trim_memory()
         return {
             "transcript": f"[Transcription error: {e}]",
             "confidence": 0.0,
@@ -250,10 +282,10 @@ def extract_audio():
         with _model_lock:
             with torch.inference_mode():
                 extracted_bytes, residue_bytes, meta = _inference.extract(mix_bytes, enr_bytes)
-        gc.collect()
+        trim_memory()
     except Exception as e:
         print(f"[EchoFocus] Extraction failed: {type(e).__name__}: {e}")
-        gc.collect()
+        trim_memory()
         return jsonify({
             "detail": "Could not process audio. Ensure files are valid WAV, MP3, M4A, or FLAC recordings."
         }), 400
@@ -279,8 +311,10 @@ def extract_audio():
     if _whisper_model is not None:
         try:
             asr_res = run_whisper_asr(ext_path, language=requested_lang)
+            trim_memory()
         except Exception as e:
             print(f"[EchoFocus] ASR execution warning: {e}")
+            trim_memory()
 
     # Save to SQLite database
     iso_time = datetime.now(timezone.utc).isoformat()
