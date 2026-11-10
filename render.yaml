@@ -7,3 +7,4 @@ services:
     region: oregon
     healthCheckPath: /health
     autoDeploy: true
+
