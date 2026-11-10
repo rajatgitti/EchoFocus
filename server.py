@@ -99,21 +99,6 @@ def trim_memory() -> None:
         pass
 
 
-def get_whisper_model():
-    global _whisper_model
-    if _whisper_model is None:
-        try:
-            print("[EchoFocus] Loading Whisper Multilingual ASR model on-demand...")
-            import whisper
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            _whisper_model = whisper.load_model("tiny", device=device)
-            trim_memory()
-            print(f"[EchoFocus] Whisper ASR (tiny) loaded successfully on device: {device}")
-        except Exception as e:
-            print(f"[EchoFocus] Warning: Whisper could not be loaded ({e}); ASR will be disabled.")
-    return _whisper_model
-
-
 def load_models() -> None:
     global _inference, _init_error
     print("[EchoFocus] Loading VANTA target speaker extraction model...")
@@ -138,21 +123,16 @@ def load_models() -> None:
 
 
 def run_whisper_asr(audio_path: str | Path, language: str | None = None) -> dict:
-    """Run Whisper Multilingual ASR with memory-efficient inference."""
-    model = get_whisper_model()
-    if model is None:
-        return {
-            "transcript": "",
-            "confidence": 0.0,
-            "detected_language": "unknown",
-            "words": [],
-            "error": "Whisper model unavailable",
-        }
-
+    """Run Whisper Multilingual ASR with memory-efficient transient lifecycle."""
     lang_arg = language if language in ("hi", "en", "ur") else None
     use_fp16 = torch.cuda.is_available()
 
+    model = None
     try:
+        import whisper
+        device = "cuda" if use_fp16 else "cpu"
+        model = whisper.load_model("tiny", device=device)
+
         with _model_lock:
             with torch.inference_mode():
                 # Avoid word_timestamps=True on CPU to eliminate heavy DTW cross-attention memory allocations
@@ -164,7 +144,6 @@ def run_whisper_asr(audio_path: str | Path, language: str | None = None) -> dict
                     fp16=use_fp16,
                     temperature=0.0,
                 )
-        trim_memory()
 
         transcript_text = asr_result.get("text", "").strip()
         detected_lang = asr_result.get("language", lang_arg or "en")
@@ -214,7 +193,6 @@ def run_whisper_asr(audio_path: str | Path, language: str | None = None) -> dict
         }
     except Exception as e:
         print(f"[EchoFocus] Whisper transcription error: {e}")
-        trim_memory()
         return {
             "transcript": f"[Transcription error: {e}]",
             "confidence": 0.0,
@@ -222,6 +200,12 @@ def run_whisper_asr(audio_path: str | Path, language: str | None = None) -> dict
             "words": [],
             "error": str(e),
         }
+    finally:
+        # Crucial for low-memory CPU containers (Render 512MB RAM):
+        # Explicitly unload Whisper after execution so container drops back to baseline ~250MB
+        if model is not None and not torch.cuda.is_available():
+            del model
+        trim_memory()
 
 
 # CORS handler
@@ -245,8 +229,8 @@ def health():
         "device": str(_inference.device) if _inference else None,
         "checkpoint": str(CHECKPOINT_PATH),
         "speaker_encoder": str(SPK_ENCODER),
-        "whisper_asr": "loaded" if _whisper_model else "available_on_demand",
-        "version": "v1.2-lazy-asr",
+        "whisper_asr": "transient_on_demand",
+        "version": "v1.3-transient-asr",
         "error": _init_error,
     }
     return jsonify(info), 200 if ok else 503
