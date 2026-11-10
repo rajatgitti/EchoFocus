@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import gc
 import io
 import json
 import os
@@ -36,6 +37,10 @@ from flask import Flask, jsonify, request, send_file, Response
 
 from vanta.config import CHECKPOINTS_DIR, SAMPLE_RATE
 from vanta.inference import VantaInference
+
+# On CPU containers (e.g. Render 512MB RAM), restrict thread counts to prevent memory bloat
+if not torch.cuda.is_available():
+    torch.set_num_threads(1)
 
 # Configuration
 PORT = int(os.environ.get("PORT", "8000"))
@@ -93,11 +98,14 @@ def load_models() -> None:
             _init_error = "Checkpoints missing. Run scripts/download_weights.py"
             return
 
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         _inference = VantaInference(
             CHECKPOINT_PATH,
             repeats=REPEATS,
+            device=device,
             speaker_encoder_ckpt=SPK_ENCODER,
         )
+        gc.collect()
         print(f"[EchoFocus] VANTA model loaded successfully on device: {_inference.device}")
     except Exception as e:
         _init_error = f"Extraction model error: {type(e).__name__}: {e}"
@@ -108,13 +116,14 @@ def load_models() -> None:
         import whisper
         device = "cuda" if torch.cuda.is_available() else "cpu"
         _whisper_model = whisper.load_model("tiny", device=device)
+        gc.collect()
         print(f"[EchoFocus] Whisper ASR (tiny) loaded successfully on device: {device}")
     except Exception as e:
         print(f"[EchoFocus] Warning: Whisper could not be loaded ({e}); ASR will be disabled.")
 
 
 def run_whisper_asr(audio_path: str | Path, language: str | None = None) -> dict:
-    """Run Whisper Multilingual ASR with word timestamps and genuine confidence estimation."""
+    """Run Whisper Multilingual ASR with memory-efficient inference."""
     if _whisper_model is None:
         return {
             "transcript": "",
@@ -125,16 +134,20 @@ def run_whisper_asr(audio_path: str | Path, language: str | None = None) -> dict
         }
 
     lang_arg = language if language in ("hi", "en", "ur") else None
+    use_fp16 = torch.cuda.is_available()
 
     try:
         with _model_lock:
-            asr_result = _whisper_model.transcribe(
-                str(audio_path),
-                language=lang_arg,
-                word_timestamps=True,
-                task="transcribe",
-                temperature=0.0,
-            )
+            with torch.inference_mode():
+                asr_result = _whisper_model.transcribe(
+                    str(audio_path),
+                    language=lang_arg,
+                    word_timestamps=True,
+                    task="transcribe",
+                    fp16=use_fp16,
+                    temperature=0.0,
+                )
+        gc.collect()
 
         transcript_text = asr_result.get("text", "").strip()
         detected_lang = asr_result.get("language", lang_arg or "en")
@@ -163,6 +176,7 @@ def run_whisper_asr(audio_path: str | Path, language: str | None = None) -> dict
         }
     except Exception as e:
         print(f"[EchoFocus] Whisper transcription error: {e}")
+        gc.collect()
         return {
             "transcript": f"[Transcription error: {e}]",
             "confidence": 0.0,
@@ -234,9 +248,12 @@ def extract_audio():
 
     try:
         with _model_lock:
-            extracted_bytes, residue_bytes, meta = _inference.extract(mix_bytes, enr_bytes)
+            with torch.inference_mode():
+                extracted_bytes, residue_bytes, meta = _inference.extract(mix_bytes, enr_bytes)
+        gc.collect()
     except Exception as e:
         print(f"[EchoFocus] Extraction failed: {type(e).__name__}: {e}")
+        gc.collect()
         return jsonify({
             "detail": "Could not process audio. Ensure files are valid WAV, MP3, M4A, or FLAC recordings."
         }), 400
@@ -253,7 +270,17 @@ def extract_audio():
     res_path.write_bytes(residue_bytes)
 
     # Run Multilingual Whisper ASR on extracted target voice
-    asr_res = run_whisper_asr(ext_path, language=requested_lang)
+    asr_res = {
+        "transcript": "",
+        "confidence": 0.0,
+        "detected_language": "en",
+        "words": [],
+    }
+    if _whisper_model is not None:
+        try:
+            asr_res = run_whisper_asr(ext_path, language=requested_lang)
+        except Exception as e:
+            print(f"[EchoFocus] ASR execution warning: {e}")
 
     # Save to SQLite database
     iso_time = datetime.now(timezone.utc).isoformat()
@@ -276,14 +303,14 @@ def extract_audio():
                     meta.get("input_seconds", 0.0),
                     meta.get("output_seconds", 0.0),
                     "completed",
-                    asr_res["transcript"],
-                    asr_res["confidence"],
-                    json.dumps(asr_res["words"]),
+                    asr_res.get("transcript", ""),
+                    asr_res.get("confidence", 0.0),
+                    json.dumps(asr_res.get("words", [])),
                     str(mix_path),
                     str(ref_path),
                     str(ext_path),
                     str(res_path),
-                    asr_res["detected_language"],
+                    asr_res.get("detected_language", "en"),
                 ),
             )
             conn.commit()
@@ -303,10 +330,10 @@ def extract_audio():
     return jsonify({
         "extracted_wav_b64": base64.b64encode(extracted_bytes).decode("ascii"),
         "residue_wav_b64": base64.b64encode(residue_bytes).decode("ascii"),
-        "transcript": asr_res["transcript"],
-        "confidence": asr_res["confidence"],
-        "detected_language": asr_res["detected_language"],
-        "words": asr_res["words"],
+        "transcript": asr_res.get("transcript", ""),
+        "confidence": asr_res.get("confidence", 0.0),
+        "detected_language": asr_res.get("detected_language", "en"),
+        "words": asr_res.get("words", []),
         "session_id": session_id,
         "created_at": iso_time,
         **meta,
@@ -424,7 +451,7 @@ def delete_session(session_id: str):
 def main():
     p = argparse.ArgumentParser(description="EchoFocus Inference Server")
     p.add_argument("--port", type=int, default=PORT, help="Port to listen on")
-    p.add_argument("--host", type=str, default="127.0.0.1", help="Host interface")
+    p.add_argument("--host", type=str, default="0.0.0.0", help="Host interface")
     args = p.parse_args()
 
     init_db()
