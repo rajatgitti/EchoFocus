@@ -102,6 +102,26 @@
     @apply opacity-40 cursor-not-allowed;
   }
 
+  .sample-select {
+    @apply rounded-md py-2 pl-3 pr-8 font-mono text-[10px] uppercase tracking-[0.16em] max-w-full cursor-pointer;
+    appearance: none;
+    border: 1px solid var(--border-strong);
+    color: var(--text-main);
+    background: rgba(7, 8, 48, 0.6)
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none' stroke='%23a5adff' stroke-width='1.5'%3E%3Cpath d='M1 1l4 4 4-4'/%3E%3C/svg%3E")
+      no-repeat right 0.75rem center;
+  }
+  .sample-select:disabled {
+    @apply opacity-40 cursor-not-allowed;
+  }
+  .sample-select option,
+  .sample-select optgroup {
+    background: #0b0d3a;
+    color: var(--text-main);
+    text-transform: none;
+    letter-spacing: normal;
+  }
+
   .btn-icon {
     @apply inline-flex h-9 w-9 items-center justify-center rounded-md transition-all duration-300;
     border: 1px solid var(--border-main);

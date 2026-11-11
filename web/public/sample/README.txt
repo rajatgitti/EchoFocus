@@ -12,3 +12,12 @@ from LibriSpeech dev-clean, which is licensed CC BY 4.0:
 
 Both speakers are held out — neither model saw them during training. On this
 pair the deployed model improves SI-SDR by +10.2 dB (+3.0 -> +13.2).
+
+ami/  Real meeting recordings from the AMI Meeting Corpus (CC BY 4.0),
+      https://groups.inf.ed.ac.uk/ami/corpus/ - meetings ES2002a and IS1009a.
+      <case>_mixture.wav    10 s from the far-field room microphone, target
+                            speaker overlapping with others
+      <case>_reference.wav  5 s of the target alone, same room microphone,
+                            from a different part of the meeting
+      Results on these are far weaker than on synthetic mixtures (about +1 dB
+      on average); IS1009a_D is a known failure case (similar voices).
