@@ -32,6 +32,64 @@ type Result = {
 
 type Status = "idle" | "running" | "error";
 
+type Sample = {
+  id: string;
+  label: string;
+  kind: "Synthetic" | "Real meeting";
+  mixture: string;
+  reference: string;
+  note: string;
+  says?: string;
+};
+
+// Real clips: AMI Meeting Corpus (CC BY 4.0), far-field room mic. See public/sample/README.txt.
+const SAMPLES: Sample[] = [
+  {
+    id: "demo",
+    label: "Studio demo",
+    kind: "Synthetic",
+    mixture: "/sample/mixture.wav",
+    reference: "/sample/reference.wav",
+    note: "Two held-out LibriSpeech speakers with reverb and noise. Best case.",
+  },
+  {
+    id: "ES2002a_B",
+    label: "Meeting · woman among men",
+    kind: "Real meeting",
+    mixture: "/sample/ami/ES2002a_B_mixture.wav",
+    reference: "/sample/ami/ES2002a_B_reference.wav",
+    note: "AMI ES2002a, room mic. Distinct voice, so the other speaker is removed well.",
+    says: "You get those ones where you can, if you like, whistle or make a really high pitched noise, they beep. Is that something we'd want to include, do you think?",
+  },
+  {
+    id: "ES2002a_D",
+    label: "Meeting · interrupted",
+    kind: "Real meeting",
+    mixture: "/sample/ami/ES2002a_D_mixture.wav",
+    reference: "/sample/ami/ES2002a_D_reference.wav",
+    note: "AMI ES2002a, room mic. A colleague cuts in with “regions and stuff”.",
+    says: "Well right away I'm wondering if there's, like with DVD players, if there are zones. Frequencies or something.",
+  },
+  {
+    id: "IS1009a_B",
+    label: "Meeting · four women",
+    kind: "Real meeting",
+    mixture: "/sample/ami/IS1009a_B_mixture.wav",
+    reference: "/sample/ami/IS1009a_B_reference.wav",
+    note: "AMI IS1009a, room mic. Similar voices; partial separation.",
+    says: "The temperature inside the house, or for air-conditioners, or for heating system. Yes, exactly.",
+  },
+  {
+    id: "IS1009a_D",
+    label: "Meeting · hard case",
+    kind: "Real meeting",
+    mixture: "/sample/ami/IS1009a_D_mixture.wav",
+    reference: "/sample/ami/IS1009a_D_reference.wav",
+    note: "AMI IS1009a, room mic. Known failure: a similar-sounding speaker leaks through.",
+    says: "Because people are silly. I mean, if it were like on top of your bookcase and you usually kept it on the coffee table.",
+  },
+];
+
 const reveal = {
   initial: { opacity: 0, y: 28 },
   whileInView: { opacity: 1, y: 0 },
@@ -49,6 +107,8 @@ export function VantaApp() {
   const [stage, setStage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [sampleLoading, setSampleLoading] = useState(false);
+  const [sampleId, setSampleId] = useState(SAMPLES[0].id);
+  const [loadedSample, setLoadedSample] = useState<Sample | null>(null);
 
   // Multilingual Whisper state
   const [selectedLanguage, setSelectedLanguage] = useState<string>("auto");
@@ -164,26 +224,39 @@ export function VantaApp() {
 
   const scrollToStudio = () => document.getElementById("studio")?.scrollIntoView({ behavior: "smooth" });
 
-  const loadSample = useCallback(async () => {
-    setSampleLoading(true);
-    setError(null);
-    try {
-      const grab = async (name: string) => {
-        const r = await fetch(`/sample/${name}`);
-        if (!r.ok) throw new Error("sample unavailable");
-        return new File([await r.blob()], name, { type: "audio/wav" });
-      };
-      const [ref, mix] = await Promise.all([grab("reference.wav"), grab("mixture.wav")]);
-      setResult(null);
-      if (status === "error") setStatus("idle");
-      setEnrollment(ref);
-      setMixture(mix);
-    } catch {
-      setError("Could not load the example. Please upload your own audio.");
-    } finally {
-      setSampleLoading(false);
-    }
-  }, [status]);
+  const loadSample = useCallback(
+    async (id: string = sampleId) => {
+      const s = SAMPLES.find((x) => x.id === id) ?? SAMPLES[0];
+      setSampleLoading(true);
+      setError(null);
+      try {
+        const grab = async (path: string) => {
+          const r = await fetch(path);
+          if (!r.ok) throw new Error("sample unavailable");
+          return new File([await r.blob()], path.split("/").pop() ?? "sample.wav", { type: "audio/wav" });
+        };
+        const [ref, mix] = await Promise.all([grab(s.reference), grab(s.mixture)]);
+        setResult(null);
+        if (status === "error") setStatus("idle");
+        setEnrollment(ref);
+        setMixture(mix);
+        setLoadedSample(s);
+      } catch {
+        setError("Could not load the example. Please upload your own audio.");
+      } finally {
+        setSampleLoading(false);
+      }
+    },
+    [status, sampleId],
+  );
+
+  // the sample note only applies while both inputs are still that sample's files
+  const activeSample =
+    loadedSample &&
+    mixture?.name === loadedSample.mixture.split("/").pop() &&
+    enrollment?.name === loadedSample.reference.split("/").pop()
+      ? loadedSample
+      : null;
 
   const download = useCallback((blob: Blob, name: string) => {
     const url = URL.createObjectURL(blob);
@@ -365,7 +438,8 @@ export function VantaApp() {
       <Hero
         sampleLoading={sampleLoading}
         onTrySample={async () => {
-          await loadSample();
+          await loadSample(SAMPLES[0].id);
+          setSampleId(SAMPLES[0].id);
           scrollToStudio();
         }}
       />
@@ -382,8 +456,28 @@ export function VantaApp() {
               Enroll the speaker you want, drop in the mixture, and EchoFocus separates, transcribes and saves the result.
             </p>
           </div>
-          <div className="flex items-center gap-2">
-            <button onClick={loadSample} disabled={sampleLoading || status === "running"} className="btn-outline">
+          <div className="flex flex-wrap items-center gap-2">
+            <label htmlFor="sample-select" className="sr-only">
+              Sample
+            </label>
+            <select
+              id="sample-select"
+              value={sampleId}
+              onChange={(e) => setSampleId(e.target.value)}
+              disabled={sampleLoading || status === "running"}
+              className="sample-select"
+            >
+              {(["Synthetic", "Real meeting"] as const).map((kind) => (
+                <optgroup key={kind} label={kind}>
+                  {SAMPLES.filter((s) => s.kind === kind).map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.label}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+            <button onClick={() => loadSample()} disabled={sampleLoading || status === "running"} className="btn-outline">
               {sampleLoading ? "Loading…" : "Load sample"}
             </button>
             <button onClick={() => openLibrary(true)} className="btn-outline">
@@ -417,10 +511,28 @@ export function VantaApp() {
               onClear={() => setMixture(null)}
               onFile={(f) => setMixture(f)}
             />
-            <ul className="mt-auto space-y-1.5 border-t border-[var(--border-main)] pt-4 text-[11.5px] text-[var(--text-faint)]">
-              <li>· Use a reference with only the target speaking.</li>
-              <li>· Mixtures are capped at 20 s on CPU, 30 s on GPU.</li>
-            </ul>
+            {activeSample ? (
+              <div className="mt-auto space-y-2 border-t border-[var(--border-main)] pt-4 text-[11.5px] leading-relaxed">
+                <div className="label-mono">
+                  {activeSample.kind} · {activeSample.label}
+                </div>
+                <p className="text-[var(--text-muted)]">{activeSample.note}</p>
+                {activeSample.says && (
+                  <p className="text-[var(--text-faint)]">
+                    <span className="text-[var(--text-muted)]">Target actually says (human transcript): </span>
+                    &ldquo;{activeSample.says}&rdquo;
+                  </p>
+                )}
+                {activeSample.kind === "Real meeting" && (
+                  <p className="text-[var(--text-faint)]">AMI Meeting Corpus, CC BY 4.0.</p>
+                )}
+              </div>
+            ) : (
+              <ul className="mt-auto space-y-1.5 border-t border-[var(--border-main)] pt-4 text-[11.5px] text-[var(--text-faint)]">
+                <li>· Use a reference with only the target speaking.</li>
+                <li>· Mixtures are capped at 20 s on CPU, 30 s on GPU.</li>
+              </ul>
+            )}
           </motion.section>
 
           {/* engine */}
