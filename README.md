@@ -7,182 +7,140 @@ sdk: docker
 app_port: 7860
 ---
 
-# EchoFocus 🎙️
+# EchoFocus
 
-> **"Focus on the Voice That Matters."**  
-> *Target Speaker Extraction with Whisper ASR, Confidence-Guided Hallucination Filtering, and Interactive Audio Studio.*
+**Focus on the voice that matters.**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python: 3.11+](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/)
-[![PyTorch: 2.6 CUDA](https://img.shields.io/badge/PyTorch-2.6%20CUDA-red.svg)](https://pytorch.org/)
-[![Next.js: 16.2](https://img.shields.io/badge/Next.js-16.2%20Turbopack-black.svg)](https://nextjs.org/)
+EchoFocus pulls one person's voice out of a messy recording. Give it a ~5-second clip of the speaker you care about and a recording where they talk over other people, music or room noise — it returns their voice on its own, everything else as a separate track, and a word-by-word transcript.
+
+Built by **[@mittalkshitij2006-tech](https://github.com/mittalkshitij2006-tech)** and **[@rajatgitti](https://github.com/rajatgitti)** as our **AI553** course project.
 
 ---
 
-## 📌 Overview
+## What it does
 
-**EchoFocus** isolates any target voice from complex multi-speaker mixtures and noisy environments using a short (5-second) reference sample of the enrolled speaker. 
+- **Target speaker extraction** — a speaker-conditioned Conv-TasNet separator isolates the enrolled voice from overlapping speech and noise.
+- **Residue track** — everything that was removed (other speakers, background) is kept as its own track, so voice + residue reconstructs the input exactly.
+- **Multilingual transcription** — Whisper transcribes the isolated voice in English, Hindi or Urdu (or auto-detects), with per-word timings and confidence.
+- **Export** — download either track as WAV, the transcript as TXT or timecoded SRT.
+- **Session library** — every run is saved to SQLite with its audio, so you can reload past results after a restart.
+- **Interactive studio** — a WebGL particle interface (three.js) that reacts while the model works, with waveform players, a guided tour and a built-in sample.
 
-It is built upon the open-source **[VANTA](https://github.com/Komalpreet2809/Vanta)** neural extraction architecture (by Komalpreet Kaur), extending it with:
-1. **Whisper ASR Integration** for immediate word-level transcription of isolated speech.
-2. **Genuine Confidence Estimation** derived from acoustic and token log-probabilities to flag potential hallucinations.
-3. **Residue Separation & Dual-Track Inspection** ensuring exact energy decomposition (Target Voice + Residue = Mixture).
-4. **Persistent SQLite Audio Library** preserving processed mixtures, reference recordings, isolated voices, transcripts, and telemetry across sessions and server restarts.
-
----
-
-## 🏛️ System Architecture
+## How it works
 
 ```mermaid
-flowchart TD
-    subgraph Inputs
-        MIX["Noisy Mixture Audio (WAV/MP3/M4A)"]
-        REF["Clean Target Speaker Reference (~5s)"]
-    end
-
-    subgraph NeuralExtraction["Target Speaker Extraction (VANTA Core)"]
-        ENC["1D Conv Audio Encoder (16 kHz)"]
-        SPK_ENC["ECAPA-TDNN Speaker Encoder\n(Trained Checkpoint, 75 MB)"]
-        SEP["Dilated Depthwise Conv-TasNet Separator\n(Trained Checkpoint, 38 MB)"]
-        DEC["1D Conv Decoder"]
-        LS["Least-Squares Gain & Sign Alignment"]
-    end
-
-    subgraph PostProcessing["EchoFocus Downstream Extensions"]
-        WHISPER["OpenAI Whisper ASR (tiny/base)"]
-        CONF["Word & Segment Confidence Estimator"]
-        LIB["SQLite Database & Audio Storage\n(echofocus.db)"]
-    end
-
-    subgraph UserInterface["EchoFocus Audio Studio (Next.js 16)"]
-        WAVE_TARGET["Isolated Target Voice (Waveform + Playback + WAV Download)"]
-        WAVE_RESIDUE["Interference Residue (Waveform + Playback + WAV Download)"]
-        TRANSCRIPT["Word-Level Transcript (Confidence Chips, TXT/SRT Export)"]
-        HIST["Session Library Drawer (Replay & Reload Past Runs)"]
-    end
-
-    MIX --> ENC
-    REF --> SPK_ENC
-    ENC --> SEP
-    SPK_ENC -->|Speaker Conditioning Vector| SEP
-    SEP --> DEC
-    DEC --> LS
-    MIX --> LS
-    LS -->|Clean Target Stream| WAVE_TARGET
-    LS -->|Interference Residue| WAVE_RESIDUE
-    LS --> WHISPER
-    WHISPER --> CONF
-    CONF --> TRANSCRIPT
-    WAVE_TARGET --> LIB
-    WAVE_RESIDUE --> LIB
-    TRANSCRIPT --> LIB
-    LIB --> HIST
+flowchart LR
+    REF["Reference clip (~5 s)"] --> SPK["ECAPA-TDNN<br/>speaker encoder"]
+    MIX["Noisy mixture"] --> ENC["Conv encoder"]
+    SPK -->|192-d voice fingerprint| SEP["Conv-TasNet separator<br/>(speaker-conditioned mask)"]
+    ENC --> SEP --> DEC["Conv decoder"]
+    DEC --> ALIGN["Gain & sign alignment"]
+    MIX --> ALIGN
+    ALIGN --> VOICE["Isolated voice"]
+    ALIGN --> RES["Residue"]
+    VOICE --> ASR["Whisper ASR"] --> TXT["Transcript + confidence"]
+    VOICE & RES & TXT --> DB[("SQLite library")]
 ```
 
+1. The speaker encoder turns the reference clip into a 192-dimensional voice fingerprint.
+2. The separator predicts a mask over the encoded mixture, conditioned on that fingerprint at every layer.
+3. The decoder turns the masked features back into audio; a least-squares step restores the correct gain and polarity so the residue is exactly *mixture − voice*.
+4. Whisper transcribes the isolated voice; results and audio are stored in the library.
+
+| Component | Details | Weights |
+|---|---|---|
+| Separator | Conv-TasNet, 24 dilated depthwise TCN blocks, 3.4 M params | `checkpoints/fully_ours/best.pt` (38 MB) |
+| Speaker encoder | ECAPA-TDNN, 6.0 M params, frozen | `checkpoints/spk_encoder/best.pt` (76 MB) |
+| ASR | OpenAI Whisper `tiny`, loaded on demand | downloaded automatically |
+
+## Results
+
+Evaluated on 300 held-out mixtures (40 LibriSpeech dev-clean speakers the model never trained on; two speakers plus noise and reverb, 0–10 dB interference):
+
+| Metric | Original weights | **Our fine-tune** |
+|---|---|---|
+| SI-SDR (mean / median) | 8.42 / 8.84 dB | **8.56 / 9.01 dB** |
+| SI-SDR improvement over the input | +5.49 dB | **+5.64 dB** |
+| PESQ (perceptual quality) | 1.39 | **1.45** |
+| STOI (intelligibility) | 0.799 | **0.802** |
+
+The fine-tune wins on 66% of individual mixtures (paired t = 2.72, p < 0.05). It was trained for 10 epochs on LibriSpeech train-clean-100 with on-the-fly mixing, recording-chain augmentation and turn-taking mixtures, warm-started from the original weights (~85 min on an RTX 4050 Laptop GPU). The original weights are kept as `checkpoints/fully_ours/best_original.pt`.
+
 ---
 
-## 🔬 Model Verification & Provenance
+## Getting started
 
-EchoFocus strictly preserves the trained neural weights and separator architecture of VANTA without retraining, random initialization, or proxy fallback:
+**Requirements:** Python 3.11–3.13, Node.js 20+, and Git (Git Bash on Windows). An NVIDIA GPU is optional but makes extraction several times faster.
 
-| Component | Architecture | Weights Provenance | Device | SI-SDR Metric |
-| :--- | :--- | :--- | :--- | :--- |
-| **Separator** | Dilated Depthwise Conv-TasNet (Repeats=3) | `checkpoints/fully_ours/best.pt` (38 MB) | CUDA / CPU | **+8.45 dB SI-SDR** |
-| **Speaker Encoder**| ECAPA-TDNN Frame-Level Pooling | `checkpoints/spk_encoder/best.pt` (75 MB) | CUDA / CPU | Extracted from scratch |
-| **ASR Engine** | OpenAI Whisper (Transformer) | `whisper-tiny` / `whisper-base` | CUDA / CPU | Word Timestamps & Logprobs |
-
-### Actual Test Run Results:
-* **Input Mixture**: 8.0s (mixture.wav)
-* **Enrollment**: 5.0s (reference.wav)
-* **Execution**: CUDA float16 / bfloat16 accelerated inference
-* **Output Voice**: 256,044 bytes (`echofocus_extracted.wav`)
-* **Output Residue**: 256,044 bytes (`echofocus_residue.wav`)
-* **Measured Transcription**: *"Without any legal funds, without any royal mandate, Secretary-Arch at the dawn of the day, let a seditious multitude to be tacked at the Senate."*
-* **Average Word Confidence**: **74.0%**
-
----
-
-## 🚀 Quickstart & Installation
-
-### 1. Prerequisites
-- **Python**: 3.10+ (tested with 3.11 and 3.14)
-- **Node.js**: v18+ or v20+
-- **Git**
-- **FFmpeg** (bundled or in PATH)
-
-### 2. Clone the Repository
 ```bash
 git clone https://github.com/rajatgitti/EchoFocus.git
 cd EchoFocus
+bash run.sh
 ```
 
-### 3. Install Backend Dependencies & Download Weights
+On Windows you can also just **double-click `run.bat`**.
+
+The first run sets everything up — a Python virtualenv, PyTorch (CUDA build if a GPU is found), dependencies, the trained weights (~110 MB) and the frontend packages — then starts both servers. Later runs skip straight to launching. Open **http://localhost:3000** and press **Try a sample** to see it work.
+
+Press `Ctrl+C` (or close the window) to stop. `bash run.sh --setup` installs without launching.
+
+<details>
+<summary>Manual setup</summary>
+
 ```bash
-# Python dependencies
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-
-# Download trained extraction checkpoints (110 MB)
 python scripts/download_weights.py
+python server.py --port 8000                        # terminal 1
+
+cd web && npm install && npm run dev                # terminal 2
 ```
 
-### 4. Install Frontend Dependencies
+Whisper needs `ffmpeg` on your PATH (`run.sh` handles this automatically).
+</details>
+
+<details>
+<summary>Training / fine-tuning</summary>
+
 ```bash
-cd web
-npm install
-cd ..
+# datasets (use --mirror openslr.elda.org if openslr.org is slow)
+python scripts/download_data.py --only librispeech,librispeech-train,rirs --mirror openslr.elda.org
+
+# fixed validation set from held-out speakers
+python scripts/build_dataset.py --n 300 --out datasets/vanta --split dev --source dev-clean \
+    --seed 1234 --intf-snr 0 10 --augment --partial-overlap 0.5
+
+# fine-tune the separator from the current weights
+python scripts/train.py --dynamic --init-from checkpoints/fully_ours/best.pt \
+    --speaker-encoder checkpoints/spk_encoder/best.pt --train-source train-clean-100 \
+    --val-manifest datasets/vanta/dev/manifest.jsonl --out checkpoints/finetune \
+    --intf-snr 0 10 --augment --partial-overlap 0.5 --clip-seconds 3.0 \
+    --batch-size 2 --grad-accum 2 --lr 1e-4 --lr-min 1e-5 --epochs 10 --epoch-size 3000 --num-workers 4
+
+# evaluate
+python scripts/evaluate.py --checkpoint checkpoints/finetune/best.pt \
+    --speaker-encoder checkpoints/spk_encoder/best.pt --manifest datasets/vanta/dev/manifest.jsonl
 ```
-
-### 5. Launch EchoFocus
-
-**Option A: Using the PowerShell Startup Script**
-```powershell
-.\start_echofocus.ps1
-```
-
-**Option B: Manual Terminal Execution**
-```bash
-# Terminal 1: Backend Server (Port 8000)
-python server.py --port 8000
-
-# Terminal 2: Next.js Frontend (Port 3000)
-cd web
-npm run dev
-```
-
-Open your browser to: **`http://localhost:3000`**
+</details>
 
 ---
 
-## 📡 API Reference
+## API
 
-### 1. Model Health
-```http
-GET /health
-```
-**Response:**
-```json
-{
-  "status": "ok",
-  "app": "EchoFocus",
-  "tagline": "Focus on the Voice That Matters.",
-  "backend": "trained",
-  "device": "cuda",
-  "checkpoint": "checkpoints/fully_ours/best.pt",
-  "speaker_encoder": "checkpoints/spk_encoder/best.pt",
-  "whisper_asr": "loaded"
-}
-```
+The backend runs on port 8000.
 
-### 2. Target Speaker Extraction
-```http
-POST /extract?include_residue=true
-Content-Type: multipart/form-data
-```
-**Body:**
-- `mixture`: Noisy recording file (WAV, MP3, M4A, FLAC).
-- `enrollment`: Target speaker sample (~5s).
+| Endpoint | Purpose |
+|---|---|
+| `GET /health` | Model status, device and checkpoint paths |
+| `POST /extract?include_residue=true` | Form fields `mixture`, `enrollment` (WAV/MP3/M4A/FLAC/MP4), optional `language` (`auto`/`en`/`hi`/`ur`). Returns both tracks as base64 WAV plus transcript, word timings and a `session_id` |
+| `POST /transcribe` | Re-run ASR for a `session_id` (or an uploaded `audio` file) in a chosen `language` |
+| `GET /library` | The 50 most recent sessions |
+| `GET /library/<id>/audio/<track>` | `extracted`, `residue`, `mixture` or `reference` |
+| `DELETE /library/<id>` | Delete a session and its audio |
 
-**Response:**
+<details>
+<summary>Example <code>/extract</code> response</summary>
+
 ```json
 {
   "extracted_wav_b64": "UklGRi...",
@@ -191,55 +149,30 @@ Content-Type: multipart/form-data
   "input_seconds": 8.0,
   "output_seconds": 8.0,
   "truncated": false,
-  "transcript": "Without any legal funds...",
-  "confidence": 0.74,
-  "words": [
-    {"word": "Without", "start": 0.0, "end": 0.6, "probability": 0.695},
-    {"word": "any", "start": 0.6, "end": 1.0, "probability": 0.933}
-  ],
-  "session_id": "db05a98c-4e4",
-  "created_at": "2026-11-10T16:17:54.000Z"
+  "transcript": "Without any legal signs, without any royal mandate, ...",
+  "confidence": 0.744,
+  "detected_language": "en",
+  "words": [{ "word": "Without", "start": 0.0, "end": 0.6, "probability": 0.70 }],
+  "session_id": "a792f014-af6",
+  "created_at": "2026-11-11T07:12:53+00:00"
 }
 ```
+</details>
 
-### 3. Persistent Library
-- `GET /library`: Retrieve array of past extraction sessions.
-- `GET /library/<session_id>/audio/<track>`: Retrieve audio stream (`extracted`, `residue`, `mixture`, `reference`).
-- `DELETE /library/<session_id>`: Remove a session and its persistent files.
+> The API has no authentication — run it on `localhost` or behind your own auth, not on the open internet.
 
----
+## Limitations
 
-## 📋 Feature Status Checklist
-
-| Feature | Status | Notes |
-| :--- | :---: | :--- |
-| **VANTA Conv-TasNet Separator** | ✅ Complete | Verified on CUDA, +8.45 dB SI-SDR checkpoint |
-| **ECAPA-TDNN Speaker Encoder** | ✅ Complete | Verified on CUDA, 75 MB trained weights |
-| **Dual Audio Separation (Target + Residue)** | ✅ Complete | Mathematically aligned least-squares decomposition |
-| **Whisper ASR Integration** | ✅ Complete | Word-level timestamps & segment alignment |
-| **Confidence Scoring & Flagging** | ✅ Complete | Genuine acoustic probabilities from model outputs |
-| **Transcript Export (TXT & SRT)** | ✅ Complete | Timecoded SRT with word-level timestamps |
-| **Persistent SQLite Library** | ✅ Complete | Sessions, metadata, and audio survive restarts |
-| **Interactive Waveform Players** | ✅ Complete | WaveSurfer.js playback and independent WAV download |
-| **Live Backend Health Telemetry** | ✅ Complete | Active backend, device, and checkpoint status |
+- **Reference length:** the speaker encoder uses exactly 5 s of reference audio — shorter clips are zero-padded, longer ones trimmed to the first 5 s. Use a clip where only the target is speaking.
+- **Mixture length:** capped at 30 s on GPU and 20 s on CPU; longer files are truncated.
+- **Hard cases:** trained on two-speaker mixtures where the target is at least as loud as the interferer. Quieter targets, 3+ simultaneous speakers or very heavy noise degrade quality, and some faint residual noise can remain in pauses.
 
 ---
 
-## ⚠️ Known Limitations
-1. **Enrollment Length**: The model expects approximately 5 seconds of single-speaker enrollment for the target speaker embedding. Shorter enrollment clips are zero-padded; longer clips are trimmed to 5 seconds.
-2. **Mixture Length Cap**: Current single-pass inference is capped at 30 seconds to bound memory and latency. Clips exceeding 30 seconds are safely truncated at the 30-second mark.
-3. **Extreme Low SNR**: In scenarios where the target voice is > 15 dB below background noise, extraction intelligibility degrades predictably.
+## Acknowledgements
 
----
+The separator architecture and original trained weights come from **[VANTA](https://github.com/Komalpreet2809/Vanta)** by Komalpreet Kaur (MIT). Training data: LibriSpeech and RIRS_NOISES from [OpenSLR](https://openslr.org). Full third-party notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-## 📜 Attribution & License
+## License
 
-EchoFocus is distributed under the **MIT License**.
-
-### Third-Party Extraction Foundation
-EchoFocus builds upon the foundational research and neural architecture of **[VANTA](https://github.com/Komalpreet2809/Vanta)** created by **Komalpreet Kaur**:
-- Neural Target Speaker Extraction Architecture (Conv-TasNet & ECAPA-TDNN)
-- Checkpoint training and baseline evaluation
-- Original frontend component structure
-
-All rights and original copyright notices are fully preserved in [LICENSE](file:///c:/Users/Rajat/echoo/LICENSE).
+[MIT](LICENSE)

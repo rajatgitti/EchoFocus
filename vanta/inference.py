@@ -23,6 +23,7 @@ import torch
 
 from vanta.config import SAMPLE_RATE
 from vanta.models.vanta import Vanta, VantaConfig
+from vanta.postprocess import clean_voice, normalize_loudness
 from vanta.utils.audio import peak_normalize
 
 MAX_MIX_SECONDS = 30.0
@@ -163,13 +164,10 @@ class VantaInference:
         mix_t = torch.from_numpy(mixture).unsqueeze(0).to(self.device)
         enr_t = torch.from_numpy(enrollment).unsqueeze(0).to(self.device)
 
-        # AMP matches how we trained, and it halves memory on long clips.
-        use_amp = self.device.type == "cuda"
-        if use_amp:
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                est = self.model(mix_t, enrollment=enr_t).float()
-        else:
-            est = self.model(mix_t, enrollment=enr_t)
+        # Full fp32 on every device. bf16 autocast scored identically on SI-SDR
+        # but added a broadband numerical hiss ~45 dB below the voice, audible
+        # in quiet passages; a 30 s clip fits comfortably in fp32 anyway.
+        est = self.model(mix_t, enrollment=enr_t)
 
         del mix_t, enr_t
         estimate = est.squeeze(0).cpu().numpy()
@@ -190,19 +188,22 @@ class VantaInference:
         alpha = float(np.dot(mix_ref, estimate)) / (float(np.dot(estimate, estimate)) + 1e-8)
         estimate = (alpha * estimate).astype(np.float32)
 
-        # Residue = what Vanta removed. Valid only because `estimate` is now in
-        # the mixture's frame: estimate + residue reconstructs the input exactly.
+        # Clean the leftover noise the separator leaves behind: residue-guided
+        # spectral suppression, then attenuation of the pauses between words.
+        # Done in the mixture's frame, before any playback gain.
+        estimate = clean_voice(estimate, mix_ref, SAMPLE_RATE)
+
+        # Residue = what Vanta removed (now including the suppressed noise).
+        # Valid only because `estimate` is in the mixture's frame:
+        # estimate + residue reconstructs the input exactly.
         residue = mix_ref - estimate
 
         # Playback gain, applied AFTER the decomposition so it can't corrupt it.
-        # A voice that was quiet in the mixture stays quiet once isolated, which
-        # is correct but hard to hear, so lift each track to a usable level.
-        def _for_playback(w: np.ndarray) -> np.ndarray:
-            peak = float(np.max(np.abs(w)))
-            return (w * (0.95 / peak)).astype(np.float32) if peak > 1e-6 else w
-
-        estimate = _for_playback(estimate)
-        residue = _for_playback(residue)
+        # Normalise to a consistent speech loudness rather than always pushing
+        # the peak to full scale, which over-boosted quiet clips and their
+        # noise floor.
+        estimate = normalize_loudness(estimate, SAMPLE_RATE)
+        residue = normalize_loudness(residue, SAMPLE_RATE)
 
         meta = {
             "sample_rate": SAMPLE_RATE,
