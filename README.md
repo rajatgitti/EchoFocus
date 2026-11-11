@@ -51,7 +51,7 @@ flowchart LR
 |---|---|---|
 | Separator | Conv-TasNet, 24 dilated depthwise TCN blocks, 3.4 M params | `checkpoints/fully_ours/best.pt` (38 MB) |
 | Speaker encoder | ECAPA-TDNN, 6.0 M params, frozen | `checkpoints/spk_encoder/best.pt` (76 MB) |
-| ASR | OpenAI Whisper `tiny`, loaded on demand | downloaded automatically |
+| ASR | OpenAI Whisper `small` on GPU (kept in memory), `tiny` on CPU (loaded on demand); override with `ECHOFOCUS_WHISPER_MODEL` | downloaded automatically |
 
 ## Results
 
@@ -65,6 +65,8 @@ Evaluated on 300 held-out mixtures (40 LibriSpeech dev-clean speakers the model 
 | STOI (intelligibility) | 0.799 | **0.802** |
 
 The fine-tune wins on 66% of individual mixtures (paired t = 2.72, p < 0.05). It was trained for 10 epochs on LibriSpeech train-clean-100 with on-the-fly mixing, recording-chain augmentation and turn-taking mixtures, warm-started from the original weights (~85 min on an RTX 4050 Laptop GPU). The original weights are kept as `checkpoints/fully_ours/best_original.pt`.
+
+**Speed** (RTX 4050 Laptop GPU, full `/extract` request including clean-up, transcription and saving): an 8 s clip takes ~1.8 s and a 30 s clip ~4.8 s, with ~3.6 GB peak GPU memory. Models are warmed up at startup, so the first request is as fast as the rest. Switching transcription from Whisper `tiny` to `small` raised word confidence on the bundled sample from 0.65 to 0.89.
 
 ---
 
