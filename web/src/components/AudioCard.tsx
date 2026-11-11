@@ -1,6 +1,6 @@
 "use client";
 
-import { Music, Pause, Play, Upload, X, Download, AudioLines } from "lucide-react";
+import { Pause, Play, X, Download, Upload } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import WaveSurfer from "wavesurfer.js";
 import { motion } from "motion/react";
@@ -16,20 +16,21 @@ type Props = {
   onDownload?: () => void;
   onFile?: (file: File) => void;
   emptyLabel?: string;
-  /** What this input is for. Shown under the empty state — the headings alone
-   *  assume the reader already knows what a reference clip is. */
+  /** What this input is for, shown in the empty state. */
   hint?: string;
   className?: string;
   id?: string;
 };
 
 const COLOR: Record<Variant, { wave: string; progress: string; dot: string }> = {
-  charcoal: { wave: "#888880", progress: "#2C2C2A", dot: "#888880" },
-  red: { wave: "#B54545", progress: "#2C2C2A", dot: "#B54545" },
-  green: { wave: "#4A6B4A", progress: "#2C2C2A", dot: "#4A6B4A" },
-  purple: { wave: "#745296", progress: "#2C2C2A", dot: "#745296" },
-  brown: { wave: "#A68A64", progress: "#2C2C2A", dot: "#A68A64" },
+  charcoal: { wave: "rgba(138,144,196,0.45)", progress: "#c9cdf5", dot: "#8a90c4" },
+  brown: { wave: "rgba(154,166,255,0.38)", progress: "#c4cbff", dot: "#9aa6ff" },
+  red: { wave: "rgba(242,166,216,0.38)", progress: "#f8cdea", dot: "#f2a6d8" },
+  green: { wave: "rgba(143,240,207,0.36)", progress: "#c3f8e6", dot: "#8ff0cf" },
+  purple: { wave: "rgba(180,140,255,0.38)", progress: "#d6c2ff", dot: "#b48cff" },
 };
+
+const ACCEPT = "audio/*,video/*,.mp3,.wav,.m4a,.mp4,.flac,.ogg,.aac";
 
 export function AudioCard({
   heading,
@@ -45,13 +46,13 @@ export function AudioCard({
   id,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
   const wsRef = useRef<WaveSurfer | null>(null);
   const [playing, setPlaying] = useState(false);
   const [ready, setReady] = useState(false);
   const [time, setTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
-  const [isHovered, setIsHovered] = useState(false);
 
   useEffect(() => {
     if (!containerRef.current || !source) {
@@ -68,15 +69,16 @@ export function AudioCard({
       progressColor: colors.progress,
       cursorColor: "transparent",
       barWidth: 2,
-      barGap: 3,
-      barRadius: 10,
-      height: 32,
+      barGap: 2,
+      barRadius: 4,
+      height: 40,
       normalize: true,
       interact: true,
     });
     wsRef.current = ws;
     setReady(false);
     setPlaying(false);
+    setTime(0);
     ws.loadBlob(source as Blob);
     ws.on("ready", () => {
       setReady(true);
@@ -97,144 +99,134 @@ export function AudioCard({
   const sizeStr = source ? `${(source.size / (1024 * 1024)).toFixed(1)} MB` : "";
   const colors = COLOR[variant];
 
+  const openPicker = () => inputRef.current?.click();
+
   return (
-    <div id={id} className={`flex flex-col gap-3 ${className}`}>
-      <div className="flex items-center gap-2 mb-1">
-        <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: colors.dot }} />
-        <h3 className="font-mono-heading text-[11px] font-black tracking-widest text-[var(--text-main)] opacity-90">
-          {heading}
-        </h3>
+    <div id={id} className={`flex flex-col gap-2.5 ${className}`}>
+      <div className="flex items-center gap-2">
+        <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: colors.dot, boxShadow: `0 0 10px ${colors.dot}` }} />
+        <h3 className="label-mono !text-[var(--text-main)]/90">{heading}</h3>
       </div>
 
+      {onFile && (
+        <input
+          ref={inputRef}
+          type="file"
+          accept={ACCEPT}
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) onFile(f);
+            e.target.value = "";
+          }}
+        />
+      )}
+
       {source ? (
-        <div className="vanta-card p-4 flex flex-col gap-4">
-          <div className="flex items-center gap-3">
-             <div className="w-10 h-10 rounded-full border border-[var(--border-main)] flex items-center justify-center bg-[var(--bg-app)]">
-                <Music className="h-5 w-5 text-[var(--text-muted)]" />
-             </div>
-             <div className="flex-1 min-w-0">
-               <div className="truncate text-[12px] font-bold text-[var(--text-main)]">{filename}</div>
-               <div className="text-[10px] font-medium text-[var(--text-muted)]">
-                 {sizeStr} • {formatTime(duration)}
-               </div>
-             </div>
-             <div className="flex items-center gap-1">
-                {onClear && (
-                    <motion.button 
-                       whileHover={{ 
-                         scale: 1.1, 
-                         rotate: 5,
-                         backgroundColor: "rgba(181, 69, 69, 0.2)",
-                         color: "#B54545"
-                       }}
-                       whileTap={{ scale: 0.9 }}
-                       onClick={onClear} 
-                       className="w-8 h-8 rounded-full flex items-center justify-center transition-all"
-                    >
-                        <X className="h-4 w-4" />
-                    </motion.button>
-                )}
-                {onDownload && (
-                    <motion.button 
-                       whileHover={{ 
-                         scale: 1.1, 
-                         rotate: -5,
-                         backgroundColor: "rgba(74, 107, 74, 0.2)",
-                         color: "#4A6B4A"
-                       }}
-                       whileTap={{ scale: 0.9 }}
-                       onClick={onDownload} 
-                       className="w-8 h-8 rounded-full flex items-center justify-center transition-all"
-                    >
-                        <Download className="h-4 w-4" />
-                    </motion.button>
-                )}
-             </div>
+        <motion.div
+          initial={{ opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="vanta-card relative overflow-hidden p-4 flex flex-col gap-3.5"
+        >
+          <div
+            className="pointer-events-none absolute -top-16 -right-16 h-40 w-40 rounded-full blur-3xl opacity-25"
+            style={{ background: colors.dot }}
+          />
+          <div className="relative flex items-center gap-3">
+            <div className="flex-1 min-w-0">
+              <div className="truncate text-[13px] font-medium text-[var(--text-main)]">{filename}</div>
+              <div className="font-mono text-[10px] text-[var(--text-muted)] mt-0.5">
+                {sizeStr} · {formatTime(duration)}
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5">
+              {onDownload && (
+                <button onClick={onDownload} className="btn-icon !h-8 !w-8" title="Download WAV" aria-label="Download WAV">
+                  <Download className="h-3.5 w-3.5" />
+                </button>
+              )}
+              {onClear && (
+                <button
+                  onClick={onClear}
+                  className="btn-icon !h-8 !w-8 hover:!text-[var(--danger)] hover:!border-[var(--danger)]/50"
+                  title="Remove"
+                  aria-label="Remove file"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
           </div>
 
-          <div className="flex items-center gap-4 px-1">
+          <div className="relative flex items-center gap-3.5">
             <motion.button
-              whileHover={{ scale: 1.1 }}
-              whileTap={{ scale: 0.95 }}
+              whileHover={{ scale: 1.06 }}
+              whileTap={{ scale: 0.94 }}
               onClick={() => wsRef.current?.playPause()}
               disabled={!ready}
-              className="w-10 h-10 rounded-full bg-[var(--text-main)] text-[var(--bg-app)] flex items-center justify-center hover:shadow-[0_0_15px_rgba(255,255,255,0.2)] transition-all disabled:opacity-50"
+              aria-label={playing ? "Pause" : "Play"}
+              className="h-10 w-10 shrink-0 rounded-full flex items-center justify-center text-[#070830] disabled:opacity-40 transition-shadow"
+              style={{ background: colors.progress, boxShadow: playing ? `0 0 24px ${colors.dot}` : "none" }}
             >
-              {playing ? <Pause className="h-5 w-5 fill-current" /> : <Play className="h-5 w-5 fill-current translate-x-[1px]" />}
+              {playing ? <Pause className="h-4 w-4 fill-current" /> : <Play className="h-4 w-4 fill-current translate-x-[1px]" />}
             </motion.button>
-            <div className="flex-1">
+            <div className="flex-1 min-w-0">
               <div ref={containerRef} className="w-full" />
-              <div className="flex justify-between text-[9px] font-medium text-[var(--text-muted)] mt-1.5 px-0.5">
+              <div className="flex justify-between font-mono text-[9px] text-[var(--text-faint)] mt-1">
                 <span>{formatTime(time)}</span>
                 <span>{formatTime(duration)}</span>
               </div>
             </div>
           </div>
-        </div>
+        </motion.div>
       ) : (
-        <div 
-          onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+        <div
+          role={onFile ? "button" : undefined}
+          tabIndex={onFile ? 0 : undefined}
+          onKeyDown={(e) => {
+            if (onFile && (e.key === "Enter" || e.key === " ")) {
+              e.preventDefault();
+              openPicker();
+            }
+          }}
+          onDragOver={(e) => {
+            if (!onFile) return;
+            e.preventDefault();
+            setIsDragging(true);
+          }}
           onDragLeave={() => setIsDragging(false)}
-          onMouseEnter={() => setIsHovered(true)}
-          onMouseLeave={() => setIsHovered(false)}
           onDrop={(e) => {
             e.preventDefault();
             setIsDragging(false);
             if (onFile && e.dataTransfer.files[0]) onFile(e.dataTransfer.files[0]);
           }}
-          onClick={() => {
-            if (!onFile) return;
-            const input = document.createElement("input");
-            input.type = "file";
-            input.accept = "audio/*,video/*,.mp3,.wav,.m4a,.mp4,.flac,.ogg,.aac";
-            input.onchange = (e) => {
-              const f = (e.target as HTMLInputElement).files?.[0];
-              if (f) onFile(f);
-            };
-            input.click();
-          }}
-          className={`flex-1 border-2 border-dashed border-[var(--border-main)] rounded-xl flex items-center justify-center transition-all duration-300 min-h-[120px] ${
-            onFile ? "cursor-pointer hover:border-[var(--text-main)] hover:bg-[var(--bg-card)]" : "bg-black/[0.02]"
-          } ${isDragging ? "border-[var(--text-main)] bg-[var(--bg-card)] scale-[0.99]" : ""}`}
+          onClick={onFile ? openPicker : undefined}
+          className={`group relative overflow-hidden rounded-xl border border-dashed min-h-[132px] flex items-center justify-center transition-all duration-300 ${
+            onFile
+              ? "cursor-pointer border-[var(--border-strong)] hover:border-[var(--accent-strong)] hover:bg-[rgba(143,155,255,0.05)]"
+              : "border-[var(--border-main)] bg-[rgba(6,8,30,0.35)]"
+          } ${isDragging ? "!border-[var(--accent-strong)] bg-[rgba(143,155,255,0.08)] scale-[0.99]" : ""}`}
         >
-          <div className="flex flex-col items-center gap-2">
-             <div className="w-9 h-9 rounded-full border border-[var(--border-main)] flex items-center justify-center bg-[var(--bg-app)] shadow-sm">
-                <div className="flex items-center gap-[2px] h-4">
-                   {[0, 1, 2, 3, 4].map((i) => (
-                      <motion.div
-                        key={i}
-                        animate={isHovered ? {
-                          height: [6, 16, 8, 14, 6],
-                          opacity: 1
-                        } : {
-                          height: 8,
-                          opacity: 0.4
-                        }}
-                        transition={{
-                          duration: 0.6,
-                          repeat: isHovered ? Infinity : 0,
-                          repeatType: "reverse",
-                          delay: i * 0.1,
-                          ease: "easeInOut"
-                        }}
-                        className="w-[2.5px] bg-[var(--text-muted)] rounded-full"
-                      />
-                   ))}
-                </div>
-             </div>
-             <div className="text-center px-6">
-                <div className="text-[12px] font-bold text-[var(--text-main)] mb-0.5 uppercase tracking-wider">
-                    {onFile ? "Drag & drop or click to upload" : emptyLabel ?? "No signal loaded"}
-                </div>
-                {hint && (
-                  <p className="text-[11px] text-[var(--text-muted)] mt-1 mb-1.5 normal-case tracking-normal opacity-90 max-w-[240px] mx-auto leading-snug">
-                      {hint}
-                  </p>
-                )}
-                <p className="text-[11px] text-[var(--text-muted)] uppercase tracking-tighter opacity-60">
-                    WAV, MP3, M4A, MP4, FLAC, OGG
-                </p>
-             </div>
+          <div className="flex flex-col items-center gap-2.5 px-6 text-center">
+            <div className="flex items-end gap-[3px] h-5" aria-hidden>
+              {[0, 1, 2, 3, 4, 5, 6].map((i) => (
+                <span
+                  key={i}
+                  className="w-[2px] rounded-full transition-all duration-500 group-hover:animate-pulse"
+                  style={{
+                    height: `${[30, 60, 90, 55, 100, 45, 70][i]}%`,
+                    background: colors.dot,
+                    opacity: onFile ? 0.7 : 0.3,
+                  }}
+                />
+              ))}
+            </div>
+            <div className="text-[13px] text-[var(--text-main)] flex items-center gap-2">
+              {onFile && <Upload className="h-3.5 w-3.5 text-[var(--text-muted)]" />}
+              {onFile ? "Drop a file or click to upload" : emptyLabel ?? "No signal loaded"}
+            </div>
+            {hint && <p className="text-[11.5px] text-[var(--text-muted)] max-w-[260px] leading-snug">{hint}</p>}
+            {onFile && <p className="label-mono !text-[8.5px] !text-[var(--text-faint)]">WAV · MP3 · M4A · MP4 · FLAC · OGG</p>}
           </div>
         </div>
       )}
