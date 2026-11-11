@@ -165,6 +165,12 @@ def main() -> None:
         help="comma-separated subset of: " + ",".join(DATASETS),
     )
     parser.add_argument(
+        "--mirror",
+        default="",
+        help="OpenSLR mirror host to download from instead of www.openslr.org, "
+             "e.g. openslr.elda.org (often several times faster)",
+    )
+    parser.add_argument(
         "--keep-archives",
         action="store_true",
         help="keep .tar.gz/.zip after extraction (default: delete)",
@@ -180,6 +186,9 @@ def main() -> None:
 
     for key in selected:
         ds = DATASETS[key]
+        if args.mirror:
+            from dataclasses import replace
+            ds = replace(ds, url=ds.url.replace("www.openslr.org", args.mirror))
         fetch(ds)
         if not args.keep_archives:
             archive = DATA_DIR / ds.archive_name
