@@ -50,8 +50,9 @@ SPK_ENCODER = str(CHECKPOINTS_DIR / "spk_encoder" / "best.pt")
 REPEATS = int(os.environ.get("ECHOFOCUS_REPEATS", "3"))
 MAX_UPLOAD_BYTES = int(os.environ.get("ECHOFOCUS_MAX_UPLOAD_BYTES", 25 * 1024 * 1024))  # 25 MB
 
-DB_PATH = Path("echofocus.db")
-STORAGE_DIR = Path("library_storage")
+BASE_DIR = Path(__file__).resolve().parent
+DB_PATH = BASE_DIR / "echofocus.db"
+STORAGE_DIR = BASE_DIR / "library_storage"
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 app = Flask("EchoFocus")
@@ -82,10 +83,14 @@ def init_db() -> None:
                 reference_path TEXT,
                 extracted_path TEXT,
                 residue_path TEXT,
-                detected_language TEXT
+                detected_language TEXT DEFAULT 'en'
             )
             """
         )
+        try:
+            conn.execute("ALTER TABLE sessions ADD COLUMN detected_language TEXT DEFAULT 'en'")
+        except Exception:
+            pass
         conn.commit()
 
 
@@ -211,7 +216,12 @@ def run_whisper_asr(audio_path: str | Path, language: str | None = None) -> dict
 # CORS handler
 @app.after_request
 def after_request(response: Response) -> Response:
-    response.headers["Access-Control-Allow-Origin"] = "*"
+    origin = request.headers.get("Origin")
+    if origin and any(origin.startswith(prefix) for prefix in ("http://localhost:3000", "http://127.0.0.1:3000", "https://echo-focus")):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+    else:
+        response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With"
     response.headers["Access-Control-Expose-Headers"] = "X-Sample-Rate, X-Output-Seconds, X-Truncated, Content-Disposition"

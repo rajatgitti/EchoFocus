@@ -3,6 +3,13 @@
 const DEFAULT_BASE = "http://127.0.0.1:8000";
 
 export function apiBase(): string {
+  // When running in the browser on localhost / 127.0.0.1, always prioritize local backend
+  if (typeof window !== "undefined") {
+    const host = window.location.hostname;
+    if (host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0") {
+      return DEFAULT_BASE;
+    }
+  }
   if (typeof process !== "undefined" && process.env.NEXT_PUBLIC_ECHOFOCUS_API) {
     return process.env.NEXT_PUBLIC_ECHOFOCUS_API;
   }
