@@ -38,9 +38,11 @@ from flask import Flask, jsonify, request, send_file, Response
 from vanta.config import CHECKPOINTS_DIR, SAMPLE_RATE
 from vanta.inference import VantaInference
 
-# On CPU containers (e.g. Render 512MB RAM), restrict thread counts to prevent memory bloat
+# On CPU hosts PyTorch defaults to one thread per core, which bloats memory on
+# tiny containers (e.g. Render 512 MB). Default to 1 thread there; machines with
+# cores and RAM to spare can raise it with ECHOFOCUS_CPU_THREADS.
 if not torch.cuda.is_available():
-    torch.set_num_threads(1)
+    torch.set_num_threads(max(1, int(os.environ.get("ECHOFOCUS_CPU_THREADS", "1"))))
 
 # Configuration
 PORT = int(os.environ.get("PORT", "8000"))
@@ -57,10 +59,21 @@ STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 app = Flask("EchoFocus")
 
-# Global locks and models
+# Whisper: keep it resident on GPU (reloading cost ~0.9 s per request); load it
+# per request on CPU hosts, where the RAM matters more. Override with
+# ECHOFOCUS_WHISPER_CACHE=1 / 0.
+# Model size: `small` on GPU (sample confidence 0.65 -> 0.89 vs tiny, +0.5 s per
+# request, ~1.4 GB VRAM); `tiny` on CPU, where small would be far too slow.
+WHISPER_SIZE = os.environ.get("ECHOFOCUS_WHISPER_MODEL", "small" if torch.cuda.is_available() else "tiny")
+_cache_env = os.environ.get("ECHOFOCUS_WHISPER_CACHE")
+CACHE_WHISPER = torch.cuda.is_available() if _cache_env is None else _cache_env.lower() in ("1", "true", "yes")
+
+# Global models. Separate locks so one request's transcription can overlap the
+# next request's separation instead of queueing behind it.
 _inference: VantaInference | None = None
 _whisper_model = None
-_model_lock = threading.Lock()
+_model_lock = threading.Lock()     # separator
+_asr_lock = threading.Lock()       # whisper (load + transcribe)
 _init_error: str | None = None
 
 
@@ -125,20 +138,67 @@ def load_models() -> None:
     except Exception as e:
         _init_error = f"Extraction model error: {type(e).__name__}: {e}"
         print(f"[EchoFocus] Failed to load VANTA model: {_init_error}")
+        return
+    warm_up()
+
+
+def warm_up() -> None:
+    """Run one throwaway extraction (and Whisper pass, if cached) at startup.
+
+    The first CUDA call pays for kernel selection and allocator setup, and the
+    first Whisper load reads weights from disk — together ~7 s that would
+    otherwise land on the first real user.
+    """
+    t0 = time.perf_counter()
+    try:
+        rng = np.random.default_rng(0)
+
+        def wav(seconds: float) -> bytes:
+            buf = io.BytesIO()
+            sf.write(buf, (rng.standard_normal(int(seconds * SAMPLE_RATE)) * 0.05).astype(np.float32),
+                     SAMPLE_RATE, format="WAV", subtype="PCM_16")
+            return buf.getvalue()
+
+        with _model_lock, torch.inference_mode():
+            _inference.extract(wav(3.0), wav(5.0))
+        if CACHE_WHISPER:
+            # Needs real speech: on silence Whisper emits no words, so the
+            # word-timestamp alignment (JIT-compiled on first use, ~2-3 s)
+            # would never run and the first user would still pay for it.
+            sample = BASE_DIR / "web" / "public" / "sample" / "reference.wav"
+            speech = str(sample) if sample.exists() else np.zeros(SAMPLE_RATE, dtype=np.float32)
+            gpu = torch.cuda.is_available()
+            with _asr_lock, torch.inference_mode():
+                _get_whisper().transcribe(speech, fp16=gpu, temperature=0.0, word_timestamps=gpu)
+        print(f"[EchoFocus] Warm-up done in {time.perf_counter() - t0:.1f}s "
+              f"(whisper {'resident' if CACHE_WHISPER else 'loaded per request'})")
+    except Exception as e:  # never block startup on warm-up
+        print(f"[EchoFocus] Warm-up skipped: {type(e).__name__}: {e}")
+    finally:
+        trim_memory()
+
+
+def _get_whisper():
+    """Return the Whisper model; caller must hold _asr_lock."""
+    global _whisper_model
+    import whisper
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if not CACHE_WHISPER:
+        return whisper.load_model(WHISPER_SIZE, device=device)
+    if _whisper_model is None:
+        _whisper_model = whisper.load_model(WHISPER_SIZE, device=device)
+    return _whisper_model
 
 
 def run_whisper_asr(audio_path: str | Path, language: str | None = None) -> dict:
-    """Run Whisper Multilingual ASR with memory-efficient transient lifecycle."""
+    """Run Whisper multilingual ASR. Resident on GPU; transient on CPU hosts."""
     lang_arg = language if language in ("hi", "en", "ur") else None
     use_fp16 = torch.cuda.is_available()
 
     model = None
     try:
-        import whisper
-        device = "cuda" if use_fp16 else "cpu"
-        model = whisper.load_model("tiny", device=device)
-
-        with _model_lock:
+        with _asr_lock:
+            model = _get_whisper()
             with torch.inference_mode():
                 # Avoid word_timestamps=True on CPU to eliminate heavy DTW cross-attention memory allocations
                 asr_result = model.transcribe(
@@ -206,11 +266,12 @@ def run_whisper_asr(audio_path: str | Path, language: str | None = None) -> dict
             "error": str(e),
         }
     finally:
-        # Crucial for low-memory CPU containers (Render 512MB RAM):
-        # Explicitly unload Whisper after execution so container drops back to baseline ~250MB
-        if model is not None and not torch.cuda.is_available():
-            del model
-        trim_memory()
+        # Transient mode (low-memory CPU containers): drop our reference so the
+        # model is freed and the process falls back to its ~250 MB baseline.
+        # In cached mode the global keeps it alive, so this is a no-op.
+        model = None
+        if not CACHE_WHISPER:
+            trim_memory()
 
 
 # CORS handler
@@ -239,8 +300,8 @@ def health():
         "device": str(_inference.device) if _inference else None,
         "checkpoint": str(CHECKPOINT_PATH),
         "speaker_encoder": str(SPK_ENCODER),
-        "whisper_asr": "transient_on_demand",
-        "version": "v1.3-transient-asr",
+        "whisper_asr": f"{WHISPER_SIZE}:{'resident' if CACHE_WHISPER else 'transient_on_demand'}",
+        "version": "v1.4-resident-asr",
         "error": _init_error,
     }
     return jsonify(info), 200 if ok else 503
