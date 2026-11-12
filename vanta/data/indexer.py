@@ -90,12 +90,42 @@ class SpeakerIndex:
         return clips[int(i)], clips[int(j)]
 
     def sample_interference_speaker(
-        self, exclude: str, rng: np.random.Generator
+        self,
+        exclude: str,
+        rng: np.random.Generator,
+        same_gender_prob: float = 0.0,
+        avoid: tuple[str, ...] = (),
     ) -> str:
+        """Pick an interfering speaker != exclude (and not in `avoid`).
+
+        With probability `same_gender_prob` (and gender metadata loaded via
+        `load_genders`), the interferer shares the target's gender: a harder,
+        similar-sounding negative, like the real-meeting failure cases.
+        """
+        skip = {exclude, *avoid}
+        pool = None
+        if same_gender_prob > 0 and getattr(self, "gender", None) and rng.random() < same_gender_prob:
+            g = self.gender.get(exclude)
+            if g is not None:
+                pool = self._by_gender.get(g)
         while True:
-            sid = self.sample_speaker(rng)
-            if sid != exclude:
+            sid = pool[int(rng.integers(0, len(pool)))] if pool else self.sample_speaker(rng)
+            if sid not in skip:
                 return sid
+
+    def load_genders(self, speakers_txt: Path) -> int:
+        """Read LibriSpeech SPEAKERS.TXT ("ID | SEX | ..."); returns speakers matched."""
+        self.gender: dict[str, str] = {}
+        for line in Path(speakers_txt).read_text(encoding="utf-8").splitlines():
+            if line.startswith(";") or "|" not in line:
+                continue
+            sid, sex = (x.strip() for x in line.split("|")[:2])
+            if sid in self.speakers:
+                self.gender[sid] = sex
+        self._by_gender: dict[str, list[str]] = defaultdict(list)
+        for sid, g in self.gender.items():
+            self._by_gender[g].append(sid)
+        return len(self.gender)
 
     def __len__(self) -> int:
         return len(self.ids)
