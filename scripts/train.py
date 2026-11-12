@@ -29,7 +29,7 @@ import json
 
 import torch
 
-from vanta.config import SAMPLE_RATE
+from vanta.config import DATA_DIR, SAMPLE_RATE
 from vanta.data.dataset import VantaDataset
 from vanta.data.dynamic_dataset import DynamicMixDataset
 from vanta.data.indexer import build_default_indices
@@ -64,6 +64,14 @@ def main() -> None:
                    help="probability of turn-taking mixtures (each speaker active only in "
                         "a random span). Teaches 'output silence when target is silent' — "
                         "required for real conversations.")
+    p.add_argument("--max-interferers", type=int, default=1,
+                   help="meeting-style scenes: up to this many interfering speakers (dynamic mode)")
+    p.add_argument("--multi-interferer-prob", type=float, default=0.0,
+                   help="probability a mixture uses 2..max-interferers interferers")
+    p.add_argument("--same-gender-prob", type=float, default=0.0,
+                   help="probability interferers share the target's gender (harder, similar voices)")
+    p.add_argument("--enroll-rir-prob", type=float, default=0.0,
+                   help="probability the enrollment clip is reverberant (room-mic reference)")
     p.add_argument("--num-workers", type=int, default=0,
                    help="DataLoader workers. >0 overlaps CPU mixing with GPU training.")
     p.add_argument(
@@ -130,6 +138,19 @@ def main() -> None:
             mix_cfg.augment.enabled = True
         if args.partial_overlap > 0:
             mix_cfg.partial_overlap_prob = args.partial_overlap
+        mix_cfg.max_interferers = args.max_interferers
+        mix_cfg.multi_interferer_prob = args.multi_interferer_prob
+        mix_cfg.same_gender_prob = args.same_gender_prob
+        mix_cfg.enroll_rir_prob = args.enroll_rir_prob
+        if args.same_gender_prob > 0:
+            spk_txt = DATA_DIR / "LibriSpeech" / "SPEAKERS.TXT"
+            if not spk_txt.exists():
+                sys.exit("--same-gender-prob needs LibriSpeech SPEAKERS.TXT under the data directory")
+            n = indices["speakers"].load_genders(spk_txt)
+            print(f"[meeting-aug] genders for {n}/{len(indices['speakers'])} speakers")
+        if args.max_interferers > 1 or args.same_gender_prob > 0 or args.enroll_rir_prob > 0:
+            print(f"[meeting-aug] interferers<= {args.max_interferers} (p={args.multi_interferer_prob})  "
+                  f"same-gender p={args.same_gender_prob}  reverberant-enrollment p={args.enroll_rir_prob}")
         train_ds = DynamicMixDataset(
             mix_cfg,
             speakers=indices["speakers"],

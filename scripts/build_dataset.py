@@ -47,6 +47,10 @@ def main() -> None:
                         "codec, room tone) to mimic real recordings")
     p.add_argument("--partial-overlap", type=float, default=0.0, metavar="PROB",
                    help="probability of turn-taking mixtures (see train.py)")
+    p.add_argument("--max-interferers", type=int, default=1, help="meeting-style scenes (see train.py)")
+    p.add_argument("--multi-interferer-prob", type=float, default=0.0)
+    p.add_argument("--same-gender-prob", type=float, default=0.0)
+    p.add_argument("--enroll-rir-prob", type=float, default=0.0)
     args = p.parse_args()
 
     indices = build_default_indices(librispeech_split=args.source)
@@ -64,6 +68,13 @@ def main() -> None:
         cfg.augment.enabled = True
     if args.partial_overlap > 0:
         cfg.partial_overlap_prob = args.partial_overlap
+    cfg.max_interferers = args.max_interferers
+    cfg.multi_interferer_prob = args.multi_interferer_prob
+    cfg.same_gender_prob = args.same_gender_prob
+    cfg.enroll_rir_prob = args.enroll_rir_prob
+    if args.same_gender_prob > 0:
+        from vanta.config import DATA_DIR
+        print(f"[meeting] genders for {indices['speakers'].load_genders(DATA_DIR / 'LibriSpeech' / 'SPEAKERS.TXT')} speakers")
     # Warn when a requested augmentation has no data backing it.
     if cfg.use_noise and "noise" not in indices:
         print("[warn] --no-noise not set but noise index missing; disabling noise")

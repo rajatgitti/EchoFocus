@@ -64,6 +64,15 @@ class MixConfig:
     partial_overlap_prob: float = 0.0
     # Each speaker's active span covers at least this fraction of the clip.
     min_active_frac: float = 0.35
+    # Meeting-style scenes (all off by default, so existing datasets are unchanged):
+    # with multi_interferer_prob, use 2..max_interferers interfering speakers;
+    # with same_gender_prob, interferers share the target's gender (needs
+    # SpeakerIndex.load_genders); with enroll_rir_prob, the enrollment clip is
+    # reverberant too, like a reference taken from the same room microphone.
+    max_interferers: int = 1
+    multi_interferer_prob: float = 0.0
+    same_gender_prob: float = 0.0
+    enroll_rir_prob: float = 0.0
 
     @property
     def clip_samples(self) -> int:
@@ -148,7 +157,9 @@ class Mixer:
         enrollment = self._load_clip(enroll_path, cfg.enroll_samples)
 
         # --- interference (different speaker)
-        intf_id = self.speakers.sample_interference_speaker(tgt_id, self.rng)
+        intf_id = self.speakers.sample_interference_speaker(
+            tgt_id, self.rng, same_gender_prob=cfg.same_gender_prob
+        )
         intf_path, _ = self.speakers.sample_two_clips(intf_id, self.rng)
         intf_dry = self._load_clip(intf_path, cfg.clip_samples)
 
@@ -156,18 +167,41 @@ class Mixer:
         target = self._apply_rir(target_dry)
         intf = self._apply_rir(intf_dry)
 
+        # --- meeting-style scenes: extra interferers at random relative levels
+        extra = []
+        if cfg.max_interferers > 1 and self.rng.random() < cfg.multi_interferer_prob:
+            n_extra = int(self.rng.integers(1, cfg.max_interferers))
+            used = [intf_id]
+            for _ in range(n_extra):
+                sid = self.speakers.sample_interference_speaker(
+                    tgt_id, self.rng, same_gender_prob=cfg.same_gender_prob, avoid=tuple(used)
+                )
+                used.append(sid)
+                path, _ = self.speakers.sample_two_clips(sid, self.rng)
+                extra.append(self._apply_rir(self._load_clip(path, cfg.clip_samples)))
+
         # --- scale interference to hit a random target-vs-interference SNR
         snr_intf = self._sample_snr(cfg.interference_snr_db)
-        intf_scaled = scale_to_snr(target, intf, snr_intf)
 
         # --- partial-overlap (turn-taking): each speaker active only in a random
         # span. The label is the MASKED target, so the model learns to output
         # silence where the target isn't speaking — the behavior real
         # conversations demand and full-overlap training never teaches.
         overlapped = self.rng.random() < cfg.partial_overlap_prob
-        if overlapped:
-            target = target * self._activity_mask(len(target))
-            intf_scaled = intf_scaled * self._activity_mask(len(intf_scaled))
+        if extra:
+            # each extra talker 0-6 dB below the first; masks before the SNR scaling
+            # so the total interference level is what the SNR refers to
+            parts = [intf] + [e * (10 ** (-self.rng.uniform(0, 6) / 20)) * rms(intf) / (rms(e) + EPS) for e in extra]
+            if overlapped:
+                parts = [x * self._activity_mask(len(x)) for x in parts]
+            intf_scaled = scale_to_snr(target, np.sum(parts, axis=0), snr_intf)
+            if overlapped:
+                target = target * self._activity_mask(len(target))
+        else:
+            intf_scaled = scale_to_snr(target, intf, snr_intf)
+            if overlapped:
+                target = target * self._activity_mask(len(target))
+                intf_scaled = intf_scaled * self._activity_mask(len(intf_scaled))
 
         # --- optional non-speech noise
         noise_scaled = np.zeros_like(target)
@@ -188,6 +222,12 @@ class Mixer:
         # The same scalar is applied to the label, so amplitude ratios are
         # preserved end-to-end.
         mixture = target + intf_scaled + noise_scaled
+
+        # --- reverberant enrollment (reference from the same room mic)
+        if cfg.enroll_rir_prob > 0 and self.rirs is not None and self.rng.random() < cfg.enroll_rir_prob:
+            rir = load_audio(self.rirs.sample(self.rng), cfg.sr)
+            rir = rir / (np.max(np.abs(rir)) + EPS)
+            enrollment = fftconvolve(enrollment, rir, mode="full")[: len(enrollment)].astype(np.float32)
 
         # --- recording-chain augmentation (mimic real recordings) ---
         if self.augment is not None:

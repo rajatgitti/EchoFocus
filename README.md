@@ -57,14 +57,26 @@ flowchart LR
 
 Evaluated on 300 held-out mixtures (40 LibriSpeech dev-clean speakers the model never trained on; two speakers plus noise and reverb, 0–10 dB interference):
 
-| Metric | Original weights | **Our fine-tune** |
-|---|---|---|
-| SI-SDR (mean / median) | 8.42 / 8.84 dB | **8.56 / 9.01 dB** |
-| SI-SDR improvement over the input | +5.49 dB | **+5.64 dB** |
-| PESQ (perceptual quality) | 1.39 | **1.45** |
-| STOI (intelligibility) | 0.799 | **0.802** |
+| Metric | Original weights | First fine-tune | **Meeting fine-tune (current)** |
+|---|---|---|---|
+| SI-SDR (mean / median) | 8.42 / 8.84 dB | 8.56 / 9.01 dB | **8.75 / 9.04 dB** |
+| SI-SDR improvement over the input | +5.49 dB | +5.64 dB | **+5.82 dB** |
+| PESQ (perceptual quality) | 1.39 | 1.45 | **1.46** |
+| STOI (intelligibility) | 0.799 | 0.802 | **0.803** |
 
-The fine-tune wins on 66% of individual mixtures (paired t = 2.72, p < 0.05). It was trained for 10 epochs on LibriSpeech train-clean-100 with on-the-fly mixing, recording-chain augmentation and turn-taking mixtures, warm-started from the original weights (~85 min on an RTX 4050 Laptop GPU). The original weights are kept as `checkpoints/fully_ours/best_original.pt`.
+The first fine-tune won on 66% of individual mixtures against the original weights (paired t = 2.72, p < 0.05). It was trained for 10 epochs on LibriSpeech train-clean-100 with on-the-fly mixing, recording-chain augmentation and turn-taking mixtures, warm-started from the original weights (~85 min on an RTX 4050 Laptop GPU).
+
+The **meeting fine-tune** continues from it for 16 epochs (~4.5 h) with meeting-style scenes. 40% of mixtures have 2–3 interfering talkers, half of the interferers share the target's gender, and half of the reference clips are reverberant, as if recorded on the same room microphone. On a separate meeting-style test set (300 mixtures, every one with 2–3 same-gender interferers), it improves SI-SDR from 6.40 to **6.72 dB** and STOI from 0.762 to 0.766.
+
+Earlier weights are kept as `checkpoints/fully_ours/best_original.pt` and `best_before_overnight.pt`.
+
+**Real meetings.** [`test_samples/real_ami/`](test_samples/real_ami/) holds 23 clips from 6 meetings of the AMI Meeting Corpus. Each clip is a far-field room microphone with overlapping talkers, plus a reference clip and the human transcript. These are much harder than the synthetic tests:
+
+- When the voices differ (for example ES2002a), separation gives about **+1 dB** against the speaker's headset, and Whisper's word error drops on some clips. On ES2002a_B it goes from 29% to 11%.
+- With similar voices (four men, or four women) or 80–100% overlapping speech, neither model reliably helps.
+- A reference cut from the same room microphone works better than a clean headset reference.
+
+Closing this gap is the main open problem.
 
 **Speed** (RTX 4050 Laptop GPU, full `/extract` request including clean-up, transcription and saving): an 8 s clip takes ~1.8 s and a 30 s clip ~4.8 s, with ~3.6 GB peak GPU memory. Models are warmed up at startup, so the first request is as fast as the rest. Switching transcription from Whisper `tiny` to `small` raised word confidence on the bundled sample from 0.65 to 0.89.
 
@@ -118,6 +130,10 @@ python scripts/train.py --dynamic --init-from checkpoints/fully_ours/best.pt \
     --val-manifest datasets/vanta/dev/manifest.jsonl --out checkpoints/finetune \
     --intf-snr 0 10 --augment --partial-overlap 0.5 --clip-seconds 3.0 \
     --batch-size 2 --grad-accum 2 --lr 1e-4 --lr-min 1e-5 --epochs 10 --epoch-size 3000 --num-workers 4
+
+# meeting-style fine-tune (how the current weights were made): add to the command above
+#   --max-interferers 3 --multi-interferer-prob 0.4 --same-gender-prob 0.5 --enroll-rir-prob 0.5
+#   --epochs 16 --epoch-size 6000 --patience 8   (and --init-from the first fine-tune)
 
 # evaluate
 python scripts/evaluate.py --checkpoint checkpoints/finetune/best.pt \
